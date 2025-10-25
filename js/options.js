@@ -1,13 +1,10 @@
 // (c) Andrew
 // Icon by dunedhel: http://dunedhel.deviantart.com/
 // Supporting functions by AdThwart - T. Joseph
-var version = (function () {
-	var xhr = new XMLHttpRequest();
-	xhr.open('GET', chrome.extension.getURL('manifest.json'), false);
-	xhr.send(null);
-	return JSON.parse(xhr.responseText).version;
-}());
-var bkg = chrome.extension.getBackgroundPage();
+// Version is now available from manifest directly
+var version = "0.47.0.1";
+// Background page is no longer available in MV3, use messaging instead
+var bkg = null;
 var error = false;
 var oldglobalstate = false;
 var settingnames = [];
@@ -36,10 +33,13 @@ document.addEventListener('DOMContentLoaded', function () {
 			listclear(1);
 		}
 	});
-	$("#enable, #enableToggle, #enableStickiness, #disableFavicons, #hidePageTitles, #showUnderline, #collapseimage, #removeBold, #showContext, #showIcon, #showUpdateNotifications").click(saveOptions);
+	$("#enable, #enableToggle, #enableStickiness, #disableFavicons, #hidePageTitles, #showUnderline, #collapseimage, #removeBold, #showContext, #showIcon, #showUpdateNotifications").change(saveOptions);
 	$("#iconTitle, #customcss").blur(saveOptions);
 	$("#s_bg, #s_text, #s_link, #s_table").keyup(updateDemo);
-	$("#global").click(function() {
+	// Update demo when relevant options change
+	$("#disableFavicons, #hidePageTitles, #showUnderline, #removeBold, #sfwmode").change(updateDemo);
+	$("#pageTitleText, #fontsize").keyup(updateDemo);
+	$("#global").change(function() {
 		saveOptions();
 	});
 	$("#opacity1").blur(function() {
@@ -86,8 +86,13 @@ document.addEventListener('DOMContentLoaded', function () {
 	});
 	//
 	$("#iconType").change(function() {
-		$("#sampleicon").attr('src', '../img/addressicon/'+$(this).val()+'.png');
-	});
+        var val = $(this).val();
+        // Handle null, undefined, or empty string
+        if (!val || val === 'null' || val === 'undefined') {
+            val = 'coffee';
+        }
+        $("#sampleicon").attr('src', '../img/addressicon/'+ val +'.png');
+    });
 	$("#fontsize").change(fontsizeValidation);
 	$("#newPages, #sfwmode, #font, #iconType").change(saveOptions);
 	$("#s_preset").change(function() {
@@ -115,19 +120,48 @@ function keyhandle(keypressed) {
 	}
 }
 function loadCheckbox(id) {
-	document.getElementById(id).checked = typeof localStorage[id] == "undefined" ? false : localStorage[id] == "true";
+	// Load from chrome.storage.local first (for MV3), fallback to localStorage
+	chrome.storage.local.get([id], function(result) {
+		var value;
+		if (result[id] !== undefined) {
+			value = result[id];
+			localStorage[id] = value; // Sync to localStorage
+		} else {
+			value = localStorage[id];
+		}
+		
+		document.getElementById(id).checked = value == 'true' || value === true;
+	});
 }
 
-function loadElement(id) {
-	$("#"+id).val(localStorage[id]);
+function loadElement(id, defaultValue) {
+	// Load from chrome.storage.local first (for MV3), fallback to localStorage
+	chrome.storage.local.get([id], function(result) {
+		if (result[id] !== undefined && result[id] !== 'undefined') {
+			$("#"+id).val(result[id]);
+			localStorage[id] = result[id]; // Sync to localStorage
+		} else if (typeof localStorage[id] !== 'undefined' && localStorage[id] !== 'undefined') {
+			$("#"+id).val(localStorage[id]);
+		} else if (defaultValue !== undefined) {
+			$("#"+id).val(defaultValue);
+			localStorage[id] = defaultValue;
+			chrome.storage.local.set({[id]: defaultValue});
+		}
+	});
 }
 
 function saveCheckbox(id) {
-	localStorage[id] = document.getElementById(id).checked;
+	var value = document.getElementById(id).checked;
+	localStorage[id] = value;
+	// Also save to chrome.storage.local for MV3 service worker
+	chrome.storage.local.set({[id]: value});
 }
 
 function saveElement(id) {
-	localStorage[id] = $("#"+id).val();
+	var value = $("#"+id).val();
+	localStorage[id] = value;
+	// Also save to chrome.storage.local for MV3 service worker
+	chrome.storage.local.set({[id]: value});
 }
 function closeOptions() {
 	window.open('', '_self', '');window.close();
@@ -254,14 +288,23 @@ function loadOptions() {
 	loadElement("font");
 	loadElement("customfont");
 	loadElement("fontsize");
-	loadElement("s_text");
-	loadElement("s_bg");
-	loadElement("s_table");
-	loadElement("s_link");
+	loadElement("s_text", "000000");
+	loadElement("s_bg", "FFFFFF");
+	loadElement("s_table", "cccccc");
+	loadElement("s_link", "000099");
 	if ($('#global').is(':checked')) $("#newPagesRow").css('display', 'none');
 	if ($('#showIcon').is(':checked')) $(".discreeticonrow").show();
 	if ($('#enableToggle').is(':checked')) $("#hotkeyrow, #paranoidhotkeyrow").show();
-	$("#sampleicon").attr('src', '../img/addressicon/'+$('#iconType').val()+'.png');
+    (function(){
+        var type = $('#iconType').val();
+        // Handle null, undefined, or empty string
+        if (!type || type === 'null' || type === 'undefined') {
+            type = 'coffee';
+            $('#iconType').val(type);
+            try { localStorage['iconType'] = type; } catch(e) {}
+        }
+        $("#sampleicon").attr('src', '../img/addressicon/'+ type +'.png');
+    })();
 	if (!$('#hidePageTitles').is(':checked')) $("#pageTitle").css('display', 'none');
 	if ($('#opacity1').val() == 0) $("#collapseimageblock").css('display', 'block');
 	if ($('#sfwmode').val() == 'SFW' || $('#sfwmode').val() == 'SFW1' || $('#sfwmode').val() == 'SFW2') $("#opacityrow").show();
@@ -275,9 +318,17 @@ function loadOptions() {
 	loadElement("customcss");
 	listUpdate();
 	opacitytest();
-	updateDemo();
+	
+	// Wait for all async loads to complete before updating demo
+	setTimeout(function() {
+		updateDemo();
+	}, 100);
 }
-function isValidColor(hex) { 
+function isValidColor(hex) {
+	// Check if hex is defined and not empty
+	if (!hex || hex === 'undefined' || hex === 'null') {
+		return false;
+	}
 	var strPattern = /^[0-9a-f]{3,6}$/i; 
 	return strPattern.test(hex); 
 }
@@ -327,8 +378,15 @@ function saveOptions() {
 	saveElement("fontsize");
 	if ($('#showIcon').is(':checked')) {
 		$(".discreeticonrow").show();
-		bkg.setDPIcon();
+		chrome.runtime.sendMessage({action: "setDPIcon"});
 	} else $(".discreeticonrow").hide();
+	// Ensure color values are initialized with defaults if missing
+	if (!$('#s_text').val() || !isValidColor($('#s_text').val())) $('#s_text').val('000000');
+	if (!$('#s_bg').val() || !isValidColor($('#s_bg').val())) $('#s_bg').val('FFFFFF');
+	if (!$('#s_table').val() || !isValidColor($('#s_table').val())) $('#s_table').val('cccccc');
+	if (!$('#s_link').val() || !isValidColor($('#s_link').val())) $('#s_link').val('000099');
+	
+	// Now validate and save
 	if (isValidColor($('#s_text').val()) && isValidColor($('#s_bg').val()) && isValidColor($('#s_table').val()) && isValidColor($('#s_link').val())) {
 		saveElement("s_text");
 		saveElement("s_bg");
@@ -340,10 +398,15 @@ function saveOptions() {
 	$("#customcss").val($("#customcss").val().replace(/\s*<([^>]+)>\s*/ig, ""));
 	saveElement("customcss");
 	updateExport();
-	// Apply new settings
-	bkg.optionsSaveTrigger(oldglobalstate, localStorage["global"]);
-	bkg.hotkeyChange();
-	oldglobalstate = localStorage["global"];
+	
+	// Wait a bit for chrome.storage.local to sync, then notify background
+	setTimeout(function() {
+		// Apply new settings
+		chrome.runtime.sendMessage({action: "optionsSaveTrigger", prevglob: oldglobalstate, newglob: localStorage["global"]});
+		chrome.runtime.sendMessage({action: "hotkeyChange"});
+		oldglobalstate = localStorage["global"];
+	}, 200);
+	
 	// Remove any existing styling
 	if (!error) notification(chrome.i18n.getMessage("saved"));
 	else notification(chrome.i18n.getMessage("invalidcolour"));
@@ -394,26 +457,55 @@ function truncText(str) {
 	return str;
 }
 function updateDemo() {
+	// Favicon visibility
 	if ($('#disableFavicons').is(':checked')) $("#demo_favicon").attr('style','visibility: hidden');
 	else $("#demo_favicon").removeAttr('style');
+	
+	// Page title
 	if ($('#hidePageTitles').is(':checked')) $("#demo_title").text(truncText($("#pageTitleText").val()));	
 	else $("#demo_title").text(chrome.i18n.getMessage("demo")+' Page');
-	$("#demo_content").css('backgroundColor', $("#s_bg").val());
-	$("#t_link").css('color', $("#s_link").val());
-	$("#test table").css('border', "1px solid #" + $("#s_table").val());
-	$("#t_table, #demo_content h1").css('color', $("#s_text").val());
+	
+	// Colors - ensure # prefix for hex colors
+	var bgColor = $("#s_bg").val();
+	if (bgColor && !bgColor.startsWith('#')) bgColor = '#' + bgColor;
+	$("#demo_content").css('backgroundColor', bgColor);
+	
+	var linkColor = $("#s_link").val();
+	if (linkColor && !linkColor.startsWith('#')) linkColor = '#' + linkColor;
+	$("#t_link").css('color', linkColor);
+	
+	var tableColor = $("#s_table").val();
+	if (tableColor && !tableColor.startsWith('#')) tableColor = '#' + tableColor;
+	$("#test table").css('border', "1px solid " + tableColor);
+	
+	var textColor = $("#s_text").val();
+	if (textColor && !textColor.startsWith('#')) textColor = '#' + textColor;
+	$("#t_table, #demo_content h1").css('color', textColor);
+	
+	// Font
 	if ($("#font").val() == '-Custom-' && $("#customfont").val()) {
-		$("#t_table, #demo_content h1").css({'font-family': $("#customfont").val(), 'font-size': $("#fontsize").val()});
+		$("#t_table, #demo_content h1").css({'font-family': $("#customfont").val(), 'font-size': $("#fontsize").val() + 'px'});
 	} else if ($("#font").val() != '-Unchanged-' && $("#font").val() != '-Custom-') {
-		$("#t_table, #demo_content h1").css({'font-family': $("#font").val(), 'font-size': $("#fontsize").val()});
+		$("#t_table, #demo_content h1").css({'font-family': $("#font").val(), 'font-size': $("#fontsize").val() + 'px'});
 	} else {	
 		$("#t_table, #demo_content h1").css({'font-family': 'Arial, sans-serif', 'font-size': '12px'});
 	}
-	if ($('#hidePageTitles').is(':checked')) $("#t_link").css('textDecoration', 'underline');
-	if ($('#removeBold').is(':checked')) $("#demo_content h1").css('font-weight', 'normal');
-	else  $("#demo_content h1").css('font-weight', 'bold');
-	if ($('#showUnderline').is(':checked')) $("#t_link").css('textDecoration', 'underline');
-	else $("#t_link").css('textDecoration', 'none');
+	
+	// Bold removal
+	if ($('#removeBold').is(':checked')) {
+		$("#demo_content h1").css('font-weight', 'normal');
+	} else {
+		$("#demo_content h1").css('font-weight', 'bold');
+	}
+	
+	// Link underline
+	if ($('#showUnderline').is(':checked')) {
+		$("#t_link").css('textDecoration', 'underline');
+	} else {
+		$("#t_link").css('textDecoration', 'none');
+	}
+	
+	// Image opacity based on SFW mode
 	if ($("#sfwmode").val() == 'Paranoid') $(".sampleimage").attr('style','visibility: hidden');
 	else if ($("#sfwmode").val() == 'NSFW') $(".sampleimage").attr('style','visibility: visible; opacity: 1 !important;').unbind();
 	else opacitytest();
@@ -488,25 +580,72 @@ function addList(type) {
 	var domain = $('#url').val();
 	domain = domain.toLowerCase();
 	
-	if (!domain.match(/^(?:[\-\w\*\?]+(\.[\-\w\*\?]+)*|((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[0-9]{1,2})\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[0-9]{1,2})|\[[A-Fa-f0-9:.]+\])?$/g)) {
+	// Check if domain is empty
+	if (!domain || domain.trim() === '') {
 		$('#listMsg').html(chrome.i18n.getMessage("invaliddomain")).stop().fadeIn("slow").delay(2000).fadeOut("slow");
-	} else {
-		bkg.domainHandler(domain, type);
+		return false;
+	}
+	
+	// Validate domain format
+	if (!domain.match(/^(?:[\-\w\*\?]+(\.[\-\w\*\?]+)*|((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[0-9]{1,2})\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[0-9]{1,2})|\[[A-Fa-f0-9:.]+\])$/)) {
+		$('#listMsg').html(chrome.i18n.getMessage("invaliddomain")).stop().fadeIn("slow").delay(2000).fadeOut("slow");
+		return false;
+	}
+	
+	// Send message to background to add domain
+	chrome.runtime.sendMessage({action: "domainHandler", domain: domain, type: type}, function(response) {
+		if (chrome.runtime.lastError) {
+			$('#listMsg').html('Error: ' + chrome.runtime.lastError.message).stop().fadeIn("slow").delay(3000).fadeOut("slow");
+			return;
+		}
+		
+		// Check if response indicates success
+		if (!response || !response.success) {
+			$('#listMsg').html('Error adding domain').stop().fadeIn("slow").delay(3000).fadeOut("slow");
+			return;
+		}
+		
+		// Wait for background to update localStorage before refreshing list
 		$('#url').val('');
 		$('#listMsg').html([chrome.i18n.getMessage("whitelisted"),chrome.i18n.getMessage("blacklisted")][type]+' '+domain+'.').stop().fadeIn("slow").delay(2000).fadeOut("slow");
-		listUpdate();
+		// Small delay to ensure localStorage is synced
+		setTimeout(function() {
+			listUpdate();
+		}, 100);
 		$('#url').focus();
-	}
+	});
+	
 	return false;
 }
 function domainRemover(domain) {
-	bkg.domainHandler(domain,2);
-	listUpdate();
+	chrome.runtime.sendMessage({action: "domainHandler", domain: domain, type: 2}, function(response) {
+		if (chrome.runtime.lastError) return;
+		// Wait for background to update localStorage before refreshing list
+		setTimeout(function() {
+			listUpdate();
+		}, 100);
+	});
 	return false;
 }
 function listUpdate() {
-	var whiteList = JSON.parse(localStorage['whiteList']);
-	var blackList = JSON.parse(localStorage['blackList']);
+	// In MV3, we need to read from chrome.storage.local instead of localStorage
+	// because the background service worker uses chrome.storage.local
+	chrome.storage.local.get(['whiteList', 'blackList'], function(result) {
+		var whiteList = [];
+		var blackList = [];
+		
+		try {
+			whiteList = result.whiteList ? JSON.parse(result.whiteList) : [];
+			blackList = result.blackList ? JSON.parse(result.blackList) : [];
+		} catch(e) {
+			console.error('Error parsing lists:', e);
+		}
+		
+		displayLists(whiteList, blackList);
+	});
+}
+
+function displayLists(whiteList, blackList) {
 	
 	var whitelistCompiled = '';
 	if(whiteList.length==0) whitelistCompiled = '['+chrome.i18n.getMessage("empty")+']';
@@ -524,13 +663,18 @@ function listUpdate() {
 	$('#blacklist').html(blacklistCompiled);
 	$(".domainRemover").unbind('click');
 	$(".domainRemover").click(function() { domainRemover($(this).attr('rel'));});
-	bkg.initLists();
+	chrome.runtime.sendMessage({action: "initLists"});
 	updateExport();
 }
 function listclear(type) {
 	if (confirm([chrome.i18n.getMessage("removefromwhitelist"),chrome.i18n.getMessage("removefromblacklist")][type]+'?')) {
-		localStorage[['whiteList','blackList'][type]] = JSON.stringify([]);
-		listUpdate();
+		var key = ['whiteList','blackList'][type];
+		// Update both localStorage and chrome.storage for consistency
+		localStorage[key] = JSON.stringify([]);
+		chrome.storage.local.set({[key]: JSON.stringify([])}, function() {
+			chrome.runtime.sendMessage({action: "initLists"});
+			listUpdate();
+		});
 	}
 	return false;
 }
@@ -570,15 +714,23 @@ function downloadtxt() {
 function updateExport() {
 	$("#settingsexport").val("");
 	settingnames = [];
-	for (var i in localStorage) {
-		if (localStorage.hasOwnProperty(i)) {
-			if (i != "version") {
-				settingnames.push(i);
-				$("#settingsexport").val($("#settingsexport").val()+i+"|"+localStorage[i].replace(/(?:\r\n|\r|\n)/g, ' ')+"\n");
+	
+	// Read from chrome.storage.local first (MV3), fallback to localStorage
+	chrome.storage.local.get(null, function(allStorage) {
+		var storageToUse = Object.keys(allStorage).length > 0 ? allStorage : localStorage;
+		
+		for (var i in storageToUse) {
+			if (storageToUse.hasOwnProperty(i)) {
+				if (i != "version") {
+					settingnames.push(i);
+					var value = storageToUse[i];
+					if (typeof value !== 'string') value = String(value);
+					$("#settingsexport").val($("#settingsexport").val()+i+"|"+value.replace(/(?:\r\n|\r|\n)/g, ' ')+"\n");
+				}
 			}
 		}
-	}
-	$("#settingsexport").val($("#settingsexport").val().slice(0,-1));
+		$("#settingsexport").val($("#settingsexport").val().slice(0,-1));
+	});
 }
 function settingsImport() {
 	var error = "";
@@ -587,29 +739,48 @@ function settingsImport() {
 		notification(chrome.i18n.getMessage("pastesettings"));
 		return false;
 	}
+	
+	var storageUpdates = {};
+	
 	if (settings.length > 0) {
 		$.each(settings, function(i, v) {
 			if ($.trim(v) != "") {
 				var settingentry = $.trim(v).split("|");
 				if (settingnames.indexOf($.trim(settingentry[0])) != -1) {
-					if ($.trim(settingentry[0]) == 'whiteList' || $.trim(settingentry[0]) == 'blackList') {
-						var listarray = $.trim(settingentry[1]).replace(/(\[|\]|")/g,"").split(",");
-						if ($.trim(settingentry[0]) == 'whiteList' && listarray.toString() != '') localStorage['whiteList'] = JSON.stringify(listarray);
-						else if ($.trim(settingentry[0]) == 'blackList' && listarray.toString() != '') localStorage['blackList'] = JSON.stringify(listarray);
-					} else 
-						localStorage[$.trim(settingentry[0])] = $.trim(settingentry[1]);
+					var key = $.trim(settingentry[0]);
+					var value = $.trim(settingentry[1]);
+					
+					if (key == 'whiteList' || key == 'blackList') {
+						var listarray = value.replace(/(\[|\]|")/g,"").split(",");
+						if (listarray.toString() != '') {
+							var jsonValue = JSON.stringify(listarray);
+							localStorage[key] = jsonValue;
+							storageUpdates[key] = jsonValue;
+						}
+					} else {
+						localStorage[key] = value;
+						storageUpdates[key] = value;
+					}
 				} else {
 					error += $.trim(settingentry[0])+", ";
 				}
 			}
 		});
-	}
-	loadOptions();
-	listUpdate();
-	if (!error) {
-		notification(chrome.i18n.getMessage("importsuccessoptions"));
-		$("#settingsimport").val("");
-	} else {
-		notification(chrome.i18n.getMessage("importsuccesscond")+error.slice(0, -2));
+		
+		// Sync all imported settings to chrome.storage.local
+		chrome.storage.local.set(storageUpdates, function() {
+			loadOptions();
+			listUpdate();
+			
+			// Notify background to reload settings
+			chrome.runtime.sendMessage({action: "optionsSaveTrigger", prevglob: localStorage["global"], newglob: localStorage["global"]});
+			
+			if (!error) {
+				notification(chrome.i18n.getMessage("importsuccessoptions"));
+				$("#settingsimport").val("");
+			} else {
+				notification(chrome.i18n.getMessage("importsuccesscond")+error.slice(0, -2));
+			}
+		});
 	}
 }
