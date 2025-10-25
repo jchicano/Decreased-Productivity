@@ -3,17 +3,94 @@
 // Supporting functions by AdThwart - T. Joseph
 
 //'use strict'; - enable after testing
-var version = (function () {
-	var xhr = new XMLHttpRequest();
-	xhr.open('GET', chrome.extension.getURL('manifest.json'), false);
-	xhr.send(null);
-	return JSON.parse(xhr.responseText).version;
-}());
+// Version is now available from manifest directly
+var version = "0.47.0.1";
 var cloakedTabs = [];
 var uncloakedTabs = [];
 var contextLoaded = false;
 var dpicon, dptitle;
 var blackList, whiteList;
+
+// ===== localStorage SHIM for Service Worker (MV3) =====
+// Service workers don't have access to localStorage, so we create a synchronous-like wrapper
+// This initializes a cache that syncs with chrome.storage.local
+var localStorageCache = {};
+var storageInitialized = false;
+
+// Initialize storage cache from chrome.storage.local
+async function initializeStorage() {
+	try {
+		const data = await chrome.storage.local.get(null);
+		localStorageCache = data || {};
+		storageInitialized = true;
+		return true;
+	} catch(e) {
+		console.error('Error initializing storage:', e);
+		return false;
+	}
+}
+
+// Synchronous localStorage replacement using cache
+var localStorage = {
+	getItem: function(key) {
+		return localStorageCache[key];
+	},
+	setItem: function(key, value) {
+		localStorageCache[key] = value;
+		// Async save to chrome.storage.local (fire and forget)
+		chrome.storage.local.set({[key]: value}).catch(e => console.error('Error saving to storage:', e));
+	},
+	removeItem: function(key) {
+		delete localStorageCache[key];
+		chrome.storage.local.remove(key).catch(e => console.error('Error removing from storage:', e));
+	},
+	clear: function() {
+		localStorageCache = {};
+		chrome.storage.local.clear().catch(e => console.error('Error clearing storage:', e));
+	}
+};
+
+// Make bracket notation work
+Object.defineProperty(localStorage, '__proto__', {
+	get: function() { return localStorageCache; },
+	set: function(obj) { 
+		for (let key in obj) {
+			if (obj.hasOwnProperty(key)) {
+				this.setItem(key, obj[key]);
+			}
+		}
+	}
+});
+
+// Proxy to enable localStorage["key"] = value syntax
+var localStorageProxy = new Proxy(localStorage, {
+	get: function(target, prop) {
+		if (prop in target) {
+			return typeof target[prop] === 'function' ? target[prop].bind(target) : target[prop];
+		}
+		return localStorageCache[prop];
+	},
+	set: function(target, prop, value) {
+		if (prop in target && typeof target[prop] === 'function') {
+			return false;
+		}
+		localStorageCache[prop] = value;
+		chrome.storage.local.set({[prop]: value}).catch(e => console.error('Error saving to storage:', e));
+		return true;
+	}
+});
+
+// Replace global reference
+localStorage = localStorageProxy;
+
+// Listen for changes in chrome.storage.local and update cache
+chrome.storage.onChanged.addListener(function(changes, areaName) {
+	if (areaName === 'local') {
+		for (let key in changes) {
+			localStorageCache[key] = changes[key].newValue;
+		}
+	}
+});
 
 // ----- Supporting Functions
 
@@ -80,34 +157,39 @@ function extractDomainFromURL(url) {
 	return url;
 }
 function domainHandler(domain,action) {
-	// Initialize local storage
-	if (typeof(localStorage['whiteList'])=='undefined') localStorage['whiteList'] = JSON.stringify([]);
-	if (typeof(localStorage['blackList'])=='undefined') localStorage['blackList'] = JSON.stringify([]);
-	var tempWhitelist = JSON.parse(localStorage['whiteList']);
-	var tempBlacklist = JSON.parse(localStorage['blackList']);
-	
-	// Remove domain from whitelist and blacklist
-	var pos = tempWhitelist.indexOf(domain);
-	if (pos>-1) tempWhitelist.splice(pos,1);
-	pos = tempBlacklist.indexOf(domain);
-	if (pos>-1) tempBlacklist.splice(pos,1);
-	
-	switch(action) {
-		case 0:	// Whitelist
-			tempWhitelist.push(domain);
-			break;
-		case 1:	// Blacklist
-			tempBlacklist.push(domain);
-			break;
-		case 2:	// Remove
-			break;
+	try {
+		// Initialize local storage
+		if (typeof(localStorage['whiteList'])=='undefined') localStorage['whiteList'] = JSON.stringify([]);
+		if (typeof(localStorage['blackList'])=='undefined') localStorage['blackList'] = JSON.stringify([]);
+		var tempWhitelist = JSON.parse(localStorage['whiteList']);
+		var tempBlacklist = JSON.parse(localStorage['blackList']);
+		
+		// Remove domain from whitelist and blacklist
+		var pos = tempWhitelist.indexOf(domain);
+		if (pos>-1) tempWhitelist.splice(pos,1);
+		pos = tempBlacklist.indexOf(domain);
+		if (pos>-1) tempBlacklist.splice(pos,1);
+		
+		switch(action) {
+			case 0:	// Whitelist
+				tempWhitelist.push(domain);
+				break;
+			case 1:	// Blacklist
+				tempBlacklist.push(domain);
+				break;
+			case 2:	// Remove
+				break;
+		}
+		
+		localStorage['blackList'] = JSON.stringify(tempBlacklist);
+		localStorage['whiteList'] = JSON.stringify(tempWhitelist);
+		blackList = tempBlacklist.sort();
+		whiteList = tempWhitelist.sort();
+		return true;
+	} catch(e) {
+		console.error('Error in domainHandler:', e);
+		return false;
 	}
-	
-	localStorage['blackList'] = JSON.stringify(tempBlacklist);
-	localStorage['whiteList'] = JSON.stringify(tempWhitelist);
-	blackList = tempBlacklist.sort();
-	whiteList = tempWhitelist.sort();
-	return false;
 }
 // ----- Options
 function optionExists(opt) {
@@ -166,26 +248,6 @@ function setDefaultOptions() {
 	if (!optionExists("blackList")) localStorage['blackList'] = JSON.stringify([]);
 	if (!optionExists("whiteList")) localStorage['whiteList'] = JSON.stringify([]);
 }
-// Context Menu
-chrome.contextMenus.create({"title": chrome.i18n.getMessage("whitelistdomain"), "contexts": ['browser_action','page_action'], "onclick": function(info, tab){
-	if (tab.url.substring(0, 4) != 'http') return;
-	domainHandler(extractDomainFromURL(tab.url), 0);
-	if (localStorage["enable"] == "true") magician('false', tab.id);
-}});
-chrome.contextMenus.create({"title": chrome.i18n.getMessage("blacklistdomain"), "contexts": ['browser_action','page_action'], "onclick": function(info, tab){
-	if (tab.url.substring(0, 4) != 'http') return;
-	domainHandler(extractDomainFromURL(tab.url), 1);
-	if (localStorage["enable"] == "true") magician('true', tab.id);
-}});
-chrome.contextMenus.create({"title": chrome.i18n.getMessage("removelist"), "contexts": ['browser_action','page_action'], "onclick": function(info, tab){
-	if (tab.url.substring(0, 4) != 'http') return;
-	domainHandler(extractDomainFromURL(tab.url), 2);
-	if (localStorage["enable"] == "true")  {
-		var flag = 'false';
-		if (localStorage['newPages'] == 'Cloak' || localStorage['global'] == 'true') flag = 'true';
-		magician(flag, tab.id);
-	}
-}});
 
 // Called by clicking on the context menu item
 function newCloak(info, tab) {
@@ -196,11 +258,69 @@ function newCloak(info, tab) {
 	// Else, it's a normal link, so load the linkUrl.
 	else chrome.tabs.create({'url': info.linkUrl}, function(tab){ cloakedTabs.push(tab.windowId+"|"+tab.id);recursiveCloak('true', localStorage["global"], tab.id); });
 }
-// Add context menu item that shows only if you right-click on links/images.
-function dpContext() {
-	if (localStorage["showContext"] == 'true' && !contextLoaded) {
-		chrome.contextMenus.create({"title": chrome.i18n.getMessage("opensafely"), "contexts": ['link', 'image'], "onclick": function(info, tab){newCloak(info, tab);}});
-		contextLoaded = true;
+// Initialize context menus safely
+var menusInitialized = false;
+function initializeContextMenus() {
+	if (menusInitialized) return;
+	
+	try {
+		// Remove all existing menus first to avoid duplicates
+		chrome.contextMenus.removeAll(function() {
+			if (chrome.runtime.lastError) {
+				console.error('Error removing menus:', chrome.runtime.lastError);
+				return;
+			}
+			
+			// Create context menus without onclick handlers (MV3 style)
+			chrome.contextMenus.create({"id": "whitelistdomain", "title": chrome.i18n.getMessage("whitelistdomain"), "contexts": ['action']}, function() {
+				if (chrome.runtime.lastError) return; // Silently ignore if already exists
+			});
+			chrome.contextMenus.create({"id": "blacklistdomain", "title": chrome.i18n.getMessage("blacklistdomain"), "contexts": ['action']}, function() {
+				if (chrome.runtime.lastError) return;
+			});
+			chrome.contextMenus.create({"id": "removelist", "title": chrome.i18n.getMessage("removelist"), "contexts": ['action']}, function() {
+				if (chrome.runtime.lastError) return;
+			});
+			
+			// Add context menu item that shows only if you right-click on links/images
+			if (localStorage["showContext"] == 'true' && !contextLoaded) {
+				chrome.contextMenus.create({"id": "opensafely", "title": chrome.i18n.getMessage("opensafely"), "contexts": ['link', 'image']}, function() {
+					if (chrome.runtime.lastError) return;
+				});
+				contextLoaded = true;
+			}
+			
+			menusInitialized = true;
+		});
+	} catch(e) {
+		console.error('Error initializing context menus:', e);
+	}
+}
+
+// Handle context menu clicks
+function handleContextMenuClick(info, tab) {
+	if (tab.url.substring(0, 4) != 'http') return;
+	
+	switch(info.menuItemId) {
+		case 'whitelistdomain':
+			domainHandler(extractDomainFromURL(tab.url), 0);
+			if (localStorage["enable"] == "true") magician('false', tab.id);
+			break;
+		case 'blacklistdomain':
+			domainHandler(extractDomainFromURL(tab.url), 1);
+			if (localStorage["enable"] == "true") magician('true', tab.id);
+			break;
+		case 'removelist':
+			domainHandler(extractDomainFromURL(tab.url), 2);
+			if (localStorage["enable"] == "true")  {
+				var flag = 'false';
+				if (localStorage['newPages'] == 'Cloak' || localStorage['global'] == 'true') flag = 'true';
+				magician(flag, tab.id);
+			}
+			break;
+		case 'opensafely':
+			newCloak(info, tab);
+			break;
 	}
 }
 // ----- Main Functions
@@ -212,7 +332,9 @@ function hotkeyChange() {
 	chrome.windows.getAll({"populate":true}, function(windows) {
 		windows.map(function(window) {
 			window.tabs.map(function(tab) {
-				if (!checkChrome(tab.url)) chrome.tabs.executeScript(tab.id, {code: 'hotkeySet("'+localStorage["enableToggle"]+'","'+localStorage["hotkey"]+'","'+localStorage["paranoidhotkey"]+'");', allFrames: true});
+				if (!checkChrome(tab.url)) chrome.scripting.executeScript({target: {tabId: tab.id}, func: function(enableToggle, hotkey, paranoidhotkey) {
+					if (typeof hotkeySet === 'function') hotkeySet(enableToggle, hotkey, paranoidhotkey);
+				}, args: [localStorage["enableToggle"], localStorage["hotkey"], localStorage["paranoidhotkey"]]}).catch(() => {});
 			});
 		});
 	});
@@ -262,22 +384,27 @@ function recursiveCloak(enable, global, tabId) {
 	}
 }
 function magician(enable, tabId) {
+	// Send simple message to content script to apply or remove cloak
+	// The content script will handle getting all settings and applying them correctly
 	if (enable == 'true') {
-		if (localStorage["disableFavicons"] == 'true' && localStorage["hidePageTitles"] == 'true')
-			chrome.tabs.executeScript(tabId, {code: 'init();faviconblank();replaceTitle("'+localStorage["pageTitleText"]+'");titleBind("'+localStorage["pageTitleText"]+'");', allFrames: true});
-		else if (localStorage["disableFavicons"] == 'true' && localStorage["hidePageTitles"] != 'true')
-			chrome.tabs.executeScript(tabId, {code: 'init();faviconblank();titleRestore();', allFrames: true});
-		else if (localStorage["disableFavicons"] != 'true' && localStorage["hidePageTitles"] == 'true')
-			chrome.tabs.executeScript(tabId, {code: 'init();faviconrestore();replaceTitle("'+localStorage["pageTitleText"]+'");titleBind("'+localStorage["pageTitleText"]+'");', allFrames: true});
-		else if (localStorage["disableFavicons"] != 'true' && localStorage["hidePageTitles"] != 'true')
-			chrome.tabs.executeScript(tabId, {code: 'init();faviconrestore();titleRestore();', allFrames: true});
-	} else chrome.tabs.executeScript(tabId, {code: "removeCss();", allFrames: true});
+		chrome.tabs.sendMessage(tabId, {action: 'applyCloak'}).catch(() => {
+			// Silently ignore errors (e.g., tab closed, restricted page)
+		});
+	} else {
+		chrome.tabs.sendMessage(tabId, {action: 'removeCloak'}).catch(() => {
+			// Silently ignore errors
+		});
+	}
 	if (localStorage["showIcon"] == 'true') {
-		if (enable == 'true') chrome.pageAction.setIcon({path: "img/addressicon/"+dpicon+".png", tabId: tabId});
-		else chrome.pageAction.setIcon({path: "img/addressicon/"+dpicon+"-disabled.png", tabId: tabId});
-		chrome.pageAction.setTitle({title: dptitle, tabId: tabId});
-		chrome.pageAction.show(tabId);
-	} else chrome.pageAction.hide(tabId);
+		try {
+			if (enable == 'true') chrome.action.setIcon({path: "/img/addressicon/"+dpicon+".png", tabId: tabId});
+			else chrome.action.setIcon({path: "/img/addressicon/"+dpicon+"-disabled.png", tabId: tabId});
+			chrome.action.setTitle({title: dptitle, tabId: tabId});
+		} catch(e) {
+			// Silently ignore icon errors
+		}
+		// Note: chrome.action.show/hide don't exist in MV3
+	}
 }
 function dpHandle(tab) {
 	if (checkChrome(tab.url)) return;
@@ -311,18 +438,37 @@ function setDPIcon() {
 	chrome.windows.getAll({"populate":true}, function(windows) {
 		windows.map(function(window) {
 			window.tabs.map(function(tab) {
-				if (cloakedTabs.indexOf(tab.windowId+"|"+tab.id) != -1) chrome.pageAction.setIcon({path: "img/addressicon/"+dpicon+".png", tabId: tab.id});
-				else chrome.pageAction.setIcon({path: "img/addressicon/"+dpicon+"-disabled.png", tabId: tab.id});
-				chrome.pageAction.setTitle({title: dptitle, tabId: tab.id});
-				if (localStorage["showIcon"] == 'true') chrome.pageAction.show(tab.id);
-				else chrome.pageAction.hide(tab.id);
+			try {
+				if (cloakedTabs.indexOf(tab.windowId+"|"+tab.id) != -1) chrome.action.setIcon({path: "/img/addressicon/"+dpicon+".png", tabId: tab.id});
+				else chrome.action.setIcon({path: "/img/addressicon/"+dpicon+"-disabled.png", tabId: tab.id});
+				chrome.action.setTitle({title: dptitle, tabId: tab.id});
+			} catch(e) {
+				// Silently ignore icon errors
+			}
+			// Note: chrome.action.show/hide don't exist in MV3
 			});
 		});
 	});
 }
 function initLists() {
-	blackList = JSON.parse(localStorage['blackList']).sort();
-	whiteList = JSON.parse(localStorage['whiteList']).sort();	
+	// Initialize lists if they don't exist or are undefined
+	if (!localStorage['blackList'] || localStorage['blackList'] === 'undefined') {
+		localStorage['blackList'] = JSON.stringify([]);
+	}
+	if (!localStorage['whiteList'] || localStorage['whiteList'] === 'undefined') {
+		localStorage['whiteList'] = JSON.stringify([]);
+	}
+	
+	try {
+		blackList = JSON.parse(localStorage['blackList']).sort();
+		whiteList = JSON.parse(localStorage['whiteList']).sort();
+	} catch(e) {
+		console.error('[BG] Error parsing lists, resetting:', e);
+		localStorage['blackList'] = JSON.stringify([]);
+		localStorage['whiteList'] = JSON.stringify([]);
+		blackList = [];
+		whiteList = [];
+	}
 }
 // ----- Request library to support content script communication
 chrome.tabs.onUpdated.addListener(function(tabid, changeinfo, tab) {
@@ -331,11 +477,15 @@ chrome.tabs.onUpdated.addListener(function(tabid, changeinfo, tab) {
 		var dpcloakindex = cloakedTabs.indexOf(dpTabId);
 		var enable = enabled(tab, dpcloakindex);
 		if (localStorage["showIcon"] == "true") {
-			if (enable == "true") chrome.pageAction.setIcon({path: "img/addressicon/"+dpicon+".png", tabId: tabid});
-			else chrome.pageAction.setIcon({path: "img/addressicon/"+dpicon+"-disabled.png", tabId: tabid});
-			chrome.pageAction.setTitle({title: dptitle, tabId: tabid});
-			chrome.pageAction.show(tabid);
-		} else chrome.pageAction.hide(tabid);
+			try {
+				if (enable == "true") chrome.action.setIcon({path: "/img/addressicon/"+dpicon+".png", tabId: tabid});
+				else chrome.action.setIcon({path: "/img/addressicon/"+dpicon+"-disabled.png", tabId: tabid});
+				chrome.action.setTitle({title: dptitle, tabId: tabid});
+			} catch(e) {
+				// Silently ignore icon errors
+			}
+			// Note: chrome.action.show/hide don't exist in MV3
+		}
 		if (checkChrome(tab.url)) return;
 		var dpuncloakindex = uncloakedTabs.indexOf(dpTabId);
 		if (enable == "true") {
@@ -431,27 +581,85 @@ var requestDispatchTable = {
 		} else fontface = localStorage["font"];
 		if (localStorage["global"] == "false") enable = 'true';
 		else enable = enabled(sender.tab);
-		sendResponse({enable: enable, sfwmode: localStorage["sfwmode"], font: fontface, fontsize: localStorage["fontsize"], underline: localStorage["showUnderline"], background: localStorage["s_bg"], text: localStorage["s_text"], table: localStorage["s_table"], link: localStorage["s_link"], bold: localStorage["removeBold"], opacity1: localStorage["opacity1"], opacity2: localStorage["opacity2"], collapseimage: localStorage["collapseimage"], maxheight: localStorage["maxheight"], maxwidth: localStorage["maxwidth"], customcss: localStorage["customcss"]});
+		sendResponse({enable: enable, sfwmode: localStorage["sfwmode"], font: fontface, fontsize: localStorage["fontsize"], underline: localStorage["showUnderline"], background: localStorage["s_bg"], text: localStorage["s_text"], table: localStorage["s_table"], link: localStorage["s_link"], bold: localStorage["removeBold"], opacity1: localStorage["opacity1"], opacity2: localStorage["opacity2"], collapseimage: localStorage["collapseimage"], maxheight: localStorage["maxheight"], maxwidth: localStorage["maxwidth"], customcss: localStorage["customcss"], favicon: localStorage["disableFavicons"]});
+	},
+	"setDPIcon": function(request, sender, sendResponse) {
+		setDPIcon();
+		sendResponse({success: true});
+	},
+	"optionsSaveTrigger": function(request, sender, sendResponse) {
+		optionsSaveTrigger(request.prevglob, request.newglob);
+		sendResponse({success: true});
+	},
+	"hotkeyChange": function(request, sender, sendResponse) {
+		hotkeyChange();
+		sendResponse({success: true});
+	},
+	"domainHandler": function(request, sender, sendResponse) {
+		var success = domainHandler(request.domain, request.type);
+		sendResponse({success: success});
+	},
+	"initLists": function(request, sender, sendResponse) {
+		initLists();
+		sendResponse({success: true});
+	},
+	"ping": function(request, sender, sendResponse) {
+		sendResponse({pong: true});
 	}
 }
+// ===== REGISTER MESSAGE LISTENER FIRST (CRITICAL) =====
 chrome.runtime.onMessage.addListener(function(request, sender, sendResponse) {
-	if (request.reqtype in requestDispatchTable) requestDispatchTable[request.reqtype](request, sender, sendResponse);
-	else sendResponse({});
+	// Handle both old reqtype format and new action format
+	var action = request.reqtype || request.action;
+	if (action in requestDispatchTable) {
+		requestDispatchTable[action](request, sender, sendResponse);
+	} else {
+		sendResponse({});
+	}
+	// Return true to indicate we will send a response asynchronously
+	return true;
 });
-// ----- If page action icon is clicked, either enable or disable the cloak
-chrome.pageAction.onClicked.addListener(function(tab) {
+
+// Register context menu click handler
+chrome.contextMenus.onClicked.addListener(handleContextMenuClick);
+
+// ----- If action icon is clicked, either enable or disable the cloak
+chrome.action.onClicked.addListener(function(tab) {
 	dpHandle(tab);
 });
-// Execute
-setDefaultOptions();
-// save blacklist and whitelist in global variable for faster lookups
-initLists();
-setDPIcon();
-dpContext();
-if ((!optionExists("version") || localStorage["version"] != version) && localStorage["showUpdateNotifications"] == 'true') {
-	//chrome.tabs.create({ url: chrome.extension.getURL('updated.html'), selected: false }); - minor update so don't show update page
-	localStorage["version"] = version;
+
+// ===== INITIALIZE EXTENSION (AFTER LISTENERS) =====
+var extensionInitialized = false;
+async function initializeExtension() {
+	if (extensionInitialized) return;
+	extensionInitialized = true;
+	
+	try {
+		// Initialize storage first (CRITICAL for MV3 service workers)
+		await initializeStorage();
+		
+		setDefaultOptions();
+		initLists();
+		setDPIcon();
+		initializeContextMenus();
+		
+		if ((!optionExists("version") || localStorage["version"] != version) && localStorage["showUpdateNotifications"] == 'true') {
+			localStorage["version"] = version;
+		}
+	} catch(e) {
+		console.error('Error initializing extension:', e);
+		extensionInitialized = false; // Allow retry on error
+	}
 }
+
+// Service worker initialization
+chrome.runtime.onInstalled.addListener(function() {
+	initializeExtension();
+});
+
+// Execute on startup (if not already initialized by onInstalled)
+initializeExtension();
+
 chrome.runtime.onUpdateAvailable.addListener(function (details) {
 	// an update is available, but wait until user restarts their browser as to not disrupt their current session and cloaked tabs.
 });
