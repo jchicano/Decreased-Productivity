@@ -1,122 +1,192 @@
 // (c) Andrew
 // Icon by dunedhel: http://dunedhel.deviantart.com/
 // Supporting functions by AdThwart - T. Joseph
-// Version is now available from manifest directly
-var version = "0.47.0.1";
-// Background page is no longer available in MV3, use messaging instead
-var bkg = null;
-var error = false;
-var oldglobalstate = false;
-var settingnames = [];
-document.addEventListener('DOMContentLoaded', function () {
-	$("#tabs").tabs();
-	$("#o1").slider({min: 0, max: 1, step: 0.05, slide: function(event, ui) { $("#opacity1").val(ui.value); opacitytest(); }, stop: function(event, ui) { 
-		if (ui.value == 0) $("#collapseimageblock").show();
-		else $("#collapseimageblock").hide();
-		saveOptions();
-	}});
-	$("#o2").slider({min: 0, max: 1, step: 0.05, slide: function(event, ui) { $("#opacity2").val(ui.value); opacitytest(); }, stop: function(event, ui) { saveOptions(); }});
-	loadOptions();
-	colorPickLoad("s_bg");
-	colorPickLoad("s_text");
-	colorPickLoad("s_link");
-	colorPickLoad("s_table");
-	$(".i18_save, .i18_savecolours").click(saveOptions);
-	$(".i18_revertcolours").click(revertColours);
-	$(".i18_addwhitelist").click(function() { addList(0); });
-	$(".i18_addblacklist").click(function() { addList(1); });
-	$(".i18_dpoptions").click(function() { location.href='options.html'; });
-	$(".i18_clear").click(function() {
-		if ($(this).parent().find('strong').hasClass('i18_whitelist')) {
-			listclear(0);
-		} else {
-			listclear(1);
+var origtitle;
+var postloaddelay;
+var dphotkeylistener;
+var timestamp = Math.round(new Date().getTime()/1000.0);
+// Normalize user input to a hostname (lowercase, no port, no path)
+function extractHostnameFromInput(input) {
+	try {
+		if (!input) return '';
+		var raw = String(input).trim();
+		if (!raw) return '';
+		var lower = raw.toLowerCase();
+		// Intento estándar con URL si parece una URL
+		if (/^[a-z]+:\/\//.test(lower) || /^\/\//.test(lower)) {
+			var withProto = lower.startsWith('//') ? ('http:' + lower) : lower;
+			var u = new URL(withProto);
+			return u.hostname || '';
 		}
-	});
-	$("#enable, #enableToggle, #enableStickiness, #disableFavicons, #hidePageTitles, #showUnderline, #collapseimage, #removeBold, #showContext, #showIcon, #showUpdateNotifications").change(saveOptions);
-	$("#iconTitle, #customcss").blur(saveOptions);
-	$("#s_bg, #s_text, #s_link, #s_table").keyup(updateDemo);
-	// Update demo when relevant options change
-	$("#disableFavicons, #hidePageTitles, #showUnderline, #removeBold, #sfwmode").change(updateDemo);
-	$("#pageTitleText, #fontsize").keyup(updateDemo);
-	$("#global").change(function() {
-		saveOptions();
-	});
-	$("#opacity1").blur(function() {
-		intValidate(this, 0.05);
-		if (this.value == 0) $("#collapseimageblock").show();
-		else $("#collapseimageblock").hide();
-		opacitytest();
-	});
-	$("#opacity2").blur(function() {
-		intValidate(this, 0.5);
-		opacitytest();
-	});
-	$("#maxwidth, #maxheight").blur(function() {
-		intValidate(this);
-	});
-	$("#pageTitleText").blur(pageTitleValidation);
-	$("#font").change(function() {
-		//if ($(this).val() == '-Unchanged-') $("#fontsize").parent().parent().hide();
-		//else $("#fontsize").parent().parent().show();
-		updateDemo();
-	});
-	// Hotkey
-	var listener;
-	var listener2;
-	var keysettings = {
-		is_solitary    : true,
-		is_unordered    : true,
-		is_exclusive    : true,
-		prevent_repeat  : true, 
-		is_sequence  : false,
-		is_counting  : false
-	};
-	listener = new window.keypress.Listener($("#hotkey"), keysettings);
-	listener.register_many(combos);
-	listener2 = new window.keypress.Listener($("#paranoidhotkey"), keysettings);
-	listener2.register_many(combos);
-	$("#hotkeyrecord").click(function() {
-		$("#hotkeyrecord").val(chrome.i18n.getMessage("hotkey_set"));
-		$("#hotkey").removeAttr('disabled').select().focus();
-	});
-	$("#paranoidhotkeyrecord").click(function() {
-		$("#paranoidhotkeyrecord").val(chrome.i18n.getMessage("hotkey_set"));
-		$("#paranoidhotkey").removeAttr('disabled').select().focus();
-	});
-	//
-	$("#iconType").change(function() {
-        var val = $(this).val();
-        // Handle null, undefined, or empty string
-        if (!val || val === 'null' || val === 'undefined') {
-            val = 'coffee';
+		// Quitar esquema si el usuario puso algo no estándar
+		lower = lower.replace(/^[a-z]+:\/\//, '');
+		// Quitar credenciales si existen
+		var atIndex = lower.indexOf('@');
+		if (atIndex !== -1) lower = lower.slice(atIndex + 1);
+		// Cortar por primera '/'
+		var slashIndex = lower.indexOf('/');
+		if (slashIndex !== -1) lower = lower.slice(0, slashIndex);
+		// Si es IPv6 en corchetes, conservar tal cual (sin puerto)
+		if (/^\[[0-9a-f:.]+\]/i.test(lower)) {
+			var end = lower.indexOf(']');
+			return end !== -1 ? lower.slice(0, end + 1) : '';
+		}
+		// Quitar puerto en dominios/IPv4
+		var colonIndex = lower.indexOf(':');
+		if (colonIndex !== -1) lower = lower.slice(0, colonIndex);
+		return lower;
+	} catch(e) {
+		return '';
+	}
+}
+
+// Remove the initial stealth style if present to restore visibility
+function removeInitialStealth() {
+	try {
+		var node = document.querySelector("style[__decreased__='initialstealth"+timestamp+"']");
+		if (node && node.parentNode) node.parentNode.removeChild(node);
+	} catch(e) {}
+}
+
+// Post-load adjustments after cloak injection; ensure page becomes visible
+function dpPostLoad(maxheight, maxwidth, sfwmode, removeBold) {
+	removeInitialStealth();
+	// Optionally enforce max dimensions if configured
+	if (maxwidth && parseInt(maxwidth, 10) > 0) {
+		try { jQuery('img, video, canvas').css('max-width', parseInt(maxwidth,10)+"px"); } catch(e) {}
+	}
+	if (maxheight && parseInt(maxheight, 10) > 0) {
+		try { jQuery('img, video, canvas').css('max-height', parseInt(maxheight,10)+"px"); } catch(e) {}
+	}
+    // Enforce anchor color via inline style to beat site !important rules
+    try {
+        var cfgLink = localStorage && localStorage['s_link'];
+        if (cfgLink && typeof cfgLink === 'string') {
+            var clr = cfgLink.trim();
+            if (clr && !/^#/.test(clr)) clr = '#' + clr;
+            document.querySelectorAll('a').forEach(function(a){
+                try { a.style.setProperty('color', clr, 'important'); } catch(_e) {}
+            });
         }
-        $("#sampleicon").attr('src', '../img/addressicon/'+ val +'.png');
-    });
-	$("#fontsize").change(fontsizeValidation);
-	$("#newPages, #sfwmode, #font, #iconType").change(saveOptions);
-	$("#s_preset").change(function() {
-		stylePreset($(this).val());
-	});
-	$("#settingsall").click(settingsall);
-	$("#importsettings").click(settingsImport);
-	$("#savetxt").click(downloadtxt);
-	$(".i18_close").click(closeOptions);
-});
-function keyhandle(keypressed) {
-	keypressed = keypressed.toUpperCase();
-	if ($("#hotkey").attr('disabled')) {
-		if (keypressed != $("#hotkey").val()) {
-			$("#paranoidhotkey").val(keypressed).attr('disabled', 'true');
-			$("#paranoidhotkeyrecord").val(chrome.i18n.getMessage("hotkey_record"));
-			saveOptions();
-		}
+    } catch(_e) {}
+    // Extra hardening for Paranoid: hide nodes with CSS-driven backgrounds and masks
+    try {
+        if (sfwmode === 'Paranoid') {
+            var candidates = document.querySelectorAll('a, div, span, i, header, section, figure, li, button, h1, h2, h3, h4, h5, h6');
+            candidates.forEach(function(el){
+                try {
+                    var cs = window.getComputedStyle(el);
+                    // Any non-none background-image is considered visual media (covers CSS vars)
+                    var hasBgImg = cs && cs.backgroundImage && cs.backgroundImage !== 'none';
+                    var hasMaskImg = cs && ((cs.webkitMaskImage && cs.webkitMaskImage !== 'none') || (cs.maskImage && cs.maskImage !== 'none'));
+                    // Consider CSS shorthand with url(...) or var(...)
+                    var hasBgShorthandUrl = cs && cs.background && (cs.background.indexOf('url(') !== -1 || cs.background.indexOf('var(') !== -1);
+                    var beforeBg = window.getComputedStyle(el, '::before');
+                    var afterBg = window.getComputedStyle(el, '::after');
+                    var pseudoHasImg = (beforeBg && beforeBg.backgroundImage && beforeBg.backgroundImage.indexOf('url(') !== -1) ||
+                                       (afterBg && afterBg.backgroundImage && afterBg.backgroundImage.indexOf('url(') !== -1);
+					// Heuristic for CSS-var icons that don't resolve in computed styles: inline style contains var(…) and element is small/empty/icon-like
+					var inlineStyle = (el.getAttribute && el.getAttribute('style')) || '';
+					var inlineHasVarBg = /background(-image)?\s*:\s*var\(/i.test(inlineStyle);
+					var isSmall = (el.clientWidth <= 48 && el.clientHeight <= 48);
+					var emptyish = (!el.textContent || el.textContent.trim() === '') && el.children.length === 0;
+					var className = (el.className || '').toString().toLowerCase();
+					var looksLikeIcon = /\b(icon|image|img|arrow|upload|button)\b/.test(className);
+
+                    if (hasBgImg || hasMaskImg || hasBgShorthandUrl || pseudoHasImg) {
+                        el.style.setProperty('display', 'none', 'important');
+                        el.style.setProperty('visibility', 'hidden', 'important');
+                        el.style.setProperty('opacity', '0', 'important');
+                    } else if (inlineHasVarBg && (isSmall || emptyish || looksLikeIcon)) {
+                        el.style.setProperty('display', 'none', 'important');
+                        el.style.setProperty('visibility', 'hidden', 'important');
+                        el.style.setProperty('opacity', '0', 'important');
+                    }
+                } catch(_e) {}
+            });
+        }
+    } catch(_e) {}
+}
+function addCloak(sfw, f, fsize, u, bg, text, table, link, bold, o1, o2, collapseimage, customcss) {
+	// Inject CSS into page
+	var cssinject = document.createElement("style");
+	cssinject.setAttribute("__decreased__", "productivity"+timestamp);
+	
+	var curlocation = document.location.href;
+	var boldcss = '';
+	var fontType = '';
+	
+	if (f != 'Serif' && f != 'Monospace' && f != '-Unchanged-') f = '"' + f + '", sans-serif';
+	if (f != '-Unchanged-') {
+		// Respect removeBold option when styling headings
+		var headingWeight = (bold === true || bold === 'true') ? 'normal' : 'bold';
+		fontType = 'font-size: ' + fsize + 'px !important; font-family: ' + f + ' !important; h1, h2, h3, h4, h5, h6, h7, h8 { font-size: ' + fsize + 'px !important; font-weight: ' + headingWeight + ' !important; } ';
+	}
+	
+	// Handle both boolean and string values
+	if (bold === true || bold === 'true') {
+		boldcss = 'font-weight: normal !important; ';
+	}
+	
+	// The code that does the magic
+    var magic = 'html, html *, html *[style], body *:before, body *:after { background-color: #' + bg + ' !important; border-color: #' + table + ' !important; border-collapse: collapse !important; color: #' + text + ' !important; stroke: #' + text + ' !important; fill: #' + bg + ' !important; ' + fontType + 'text-decoration: none !important; -webkit-filter: initial !important; box-shadow: none !important; -webkit-box-shadow: none !important; text-shadow: none !important; ' + boldcss + '} ';
+    // Enforce link colors across states with high specificity
+    magic += ' html body a, html body a:link, html body a:visited, html body a:hover, html body a:active { color: #' + link + ' !important; } ';
+	if (curlocation.match(/^https?:\/\/www\.facebook\.com\//i)) {
+		magic += 'html, html *:not(.img), body *:not(.img):before, body *:not(.img):after { background-image: none !important; } ';
+		magic += '*:after { content: initial !important; }  ';
+		if (sfw == 'SFW' || sfw == 'SFW1' || sfw == 'SFW2') magic += 'i.img { opacity: '+o1+' !important; } i.img:hover { opacity: '+o2+' !important; } ';
+		else if (o1 == 0 && collapseimage == 'true') magic += 'i.img { display: none !important; } ';
+		else if (sfw == 'Paranoid') magic += 'i.img { visibility: hidden !important; opacity: 0 !important; } ';
 	} else {
-		if (keypressed != $("#paranoidhotkey").val()) {
-			$("#hotkey").val(keypressed).attr('disabled', 'true');
-			$("#hotkeyrecord").val(chrome.i18n.getMessage("hotkey_record"));
-			saveOptions();
+		// Handle both boolean and string values
+		if (u === true || u === 'true') {
+			magic += 'underline !important; }';
+		} else {
+			magic += 'none !important; }';
 		}
+		
+		// Convert o1 to number for comparison
+		var o1Num = parseFloat(o1);
+		
+		if (sfw == 'SFW' || sfw == 'SFW1' || sfw == 'SFW2') {
+			if (o1Num == 0 && collapseimage == 'true') {
+				magic += ' iframe, img, canvas, input[type=image], path, polygon, picture { display: none !important; }';
+			} else {
+				magic += ' iframe, img, canvas, input[type=image], path, polygon, picture { opacity: '+o1+' !important; } iframe:hover, img:hover, input[type=image]:hover, path:hover, polygon:hover { opacity: '+o2+' !important; }';
+			}
+		}
+		if (sfw == 'SFW') {
+			if (o1Num == 0 && collapseimage == 'true') {
+				magic += ' object, embed, param, video, audio { display: none !important; }';
+			} else {
+				magic += ' object, embed, param, video, audio { opacity: '+o1+' !important; } object:hover, embed:hover, param:hover, video:hover, audio:hover { opacity: '+o2+' !important; }';
+			}
+		}
+		if (sfw == 'SFW1') {
+			magic += ' object, embed, param, video, audio { display: none !important; opacity: 0 !important; }';
+		}
+		if (sfw == 'Paranoid') {
+			// Hide all visual media and backgrounds in paranoid mode
+			magic += ' html, html * { background: none !important; background-image: none !important; -webkit-mask-image: none !important; mask-image: none !important; } *:before, *:after { content: none !important; }';
+			// Hide common visual elements including SVG
+			magic += ' img, image, svg, svg image, use, symbol, pattern, defs, canvas, input[type=image], path, polygon, object, embed, param, video, audio, picture, source { display: none !important; opacity: 0 !important; }';
+			// Hide common logo patterns and empty anchors/spans used as CSS logos
+			magic += ' [class*="logo" i], [id*="logo" i] { display: none !important; } a:empty, span:empty { display: none !important; }';
+			magic += ' iframe { opacity: 0.05 !important; } iframe:hover { opacity: 0.5 !important; }';
+		}
+	}
+	
+	if (customcss) magic += ' ' + customcss;
+	cssinject.innerHTML = magic;
+	document.documentElement.appendChild(cssinject, null);
+	
+	if (bold == 'true') {
+		jQuery("a:not([__decreased__='link"+timestamp+"'])").addClass('dp'+timestamp+'_link dp'+timestamp+'_unbold').attr('__decreased__', 'link'+timestamp);
+		jQuery("body *:not([__decreased__])").addClass('dp'+timestamp+'_text dp'+timestamp+'_unbold').attr('__decreased__', 'element'+timestamp);
+	} else {
+		jQuery("a:not([__decreased__='link"+timestamp+"'])").addClass('dp'+timestamp+'_link').attr('__decreased__', 'link'+timestamp);
+		jQuery("body *:not([__decreased__])").addClass('dp'+timestamp+'_text').attr('__decreased__', 'element'+timestamp);
 	}
 }
 function loadCheckbox(id) {
@@ -578,7 +648,16 @@ function stylePreset(s) {
 // <!-- modified from KB SSL Enforcer: https://code.google.com/p/kbsslenforcer/
 function addList(type) {
 	var domain = $('#url').val();
-	domain = domain.toLowerCase();
+	var normalized = extractHostnameFromInput(domain);
+	if (!normalized) {
+		$('#listMsg').html(chrome.i18n.getMessage("invaliddomain")).stop().fadeIn("slow").delay(2000).fadeOut("slow");
+		return false;
+	}
+	// Si cambia tras normalizar, reflejarlo en el input y usarlo
+	if (normalized !== String(domain).trim().toLowerCase()) {
+		$('#url').val(normalized);
+	}
+	domain = normalized;
 	
 	// Check if domain is empty
 	if (!domain || domain.trim() === '') {
@@ -784,3 +863,290 @@ function settingsImport() {
 		});
 	}
 }
+function removeCss(name) {
+	if (typeof(name) === 'undefined') jQuery("style[__decreased__='productivity"+timestamp+"']").remove();
+	else jQuery("style[__decreased__='"+name+"']").remove();
+	if (typeof(name) === 'undefined') {
+		faviconrestore();
+		titleRestore();
+		jQuery('body').unbind('DOMSubtreeModified.decreasedproductivity'+timestamp);
+		jQuery("[__decreased__]").each(function() {
+			jQuery(this).removeClass('dp'+timestamp+'_visible dp'+timestamp+'_unbold dp'+timestamp+'_link dp'+timestamp+'_text dp'+timestamp+'_hide').removeAttr("__decreased__");
+		});
+	}
+}
+function init() {
+	// Ask background if this tab should be cloaked (respects blacklist, whitelist, and tab state)
+	chrome.runtime.sendMessage({reqtype: "should-cloak-tab"}, function(shouldCloakResponse) {
+		if (shouldCloakResponse && shouldCloakResponse.shouldCloak) {
+			// Get settings for applying cloak
+            chrome.runtime.sendMessage({reqtype: "get-settings"}, function(response) {
+                console.log('[DP] Applying cloak to tab:', window.location.href);
+                addCloak(response.sfwmode, response.font, response.fontsize, response.underline, response.background, response.text, response.table, response.link, response.bold, response.opacity1, response.opacity2, response.collapseimage, response.customcss);
+                try { dpPostLoad(response.maxheight, response.maxwidth, response.sfwmode, response.bold); } catch(e) { try { removeInitialStealth(); } catch(_) {} }
+				jQuery('body').unbind('DOMSubtreeModified.decreasedproductivity'+timestamp);
+				jQuery('body').bind('DOMSubtreeModified.decreasedproductivity'+timestamp, function() {
+					clearTimeout(postloaddelay);
+                    postloaddelay = setTimeout(function(){ try { dpPostLoad(response.maxheight, response.maxwidth, response.sfwmode, response.bold) } catch(e) { try { removeInitialStealth(); } catch(_) {} } }, 500);
+				});
+			});
+		} else {
+			// Fallback race protection: if background isn't ready yet, rely on get-enabled snapshot
+			chrome.runtime.sendMessage({reqtype: "get-enabled"}, function(enabledResponse) {
+				if (enabledResponse && (enabledResponse.enable === 'true' || enabledResponse.enable === true)) {
+					// Extra fallback: consult domain status and force if blacklist
+					chrome.runtime.sendMessage({action: "get-domain-status"}, function(domainResp) {
+						var shouldForce = domainResp && domainResp.result === '1';
+                    chrome.runtime.sendMessage({reqtype: "get-settings"}, function(response) {
+                        console.log('[DP] Applying cloak via fallback'+(shouldForce?' (blacklist)':'' )+':', window.location.href);
+                        addCloak(response.sfwmode, response.font, response.fontsize, response.underline, response.background, response.text, response.table, response.link, response.bold, response.opacity1, response.opacity2, response.collapseimage, response.customcss);
+                        try { dpPostLoad(response.maxheight, response.maxwidth, response.sfwmode, response.bold); } catch(e) { try { removeInitialStealth(); } catch(_) {} }
+                        jQuery('body').unbind('DOMSubtreeModified.decreasedproductivity'+timestamp);
+                        jQuery('body').bind('DOMSubtreeModified.decreasedproductivity'+timestamp, function() {
+                            clearTimeout(postloaddelay);
+                            postloaddelay = setTimeout(function(){ try { dpPostLoad(response.maxheight, response.maxwidth, response.sfwmode, response.bold) } catch(e) { try { removeInitialStealth(); } catch(_) {} } }, 500);
+                        });
+                    });
+					});
+				} else {
+					console.log('[DP] Not cloaking tab:', window.location.href, shouldCloakResponse);
+				}
+			});
+		}
+	});
+}
+// Favicon.js - Change favicon dynamically [http://ajaxify.com/run/favicon].
+// Copyright (c) 2006 Michael Mahemoff
+// Modifications - Andrew Y.
+function faviconblank() {
+	jQuery(document).ready(function() {
+		if (!jQuery("link#decreasedproductivity"+timestamp).length) {
+			var link = document.createElement("link");
+			link.type = "image/x-icon";
+			link.rel = "shortcut icon";
+			link.id = "decreasedproductivity"+timestamp;
+			link.href = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAAAZiS0dEAP8A/wD/oL2nkwAAAAlwSFlzAAALEwAACxMBAJqcGAAAAAd0SU1FB9oFFAADATTAuQQAAAAZdEVYdENvbW1lbnQAQ3JlYXRlZCB3aXRoIEdJTVBXgQ4XAAAAEklEQVQ4y2NgGAWjYBSMAggAAAQQAAGFP6pyAAAAAElFTkSuQmCC'; // transparent png
+			faviconclear();
+			document.getElementsByTagName("head")[0].appendChild(link);
+		}
+	});
+}
+function faviconclear() {
+	jQuery("link[rel='shortcut icon'], link[rel='icon']").each(function() {
+		jQuery(this).attr('data-rel', jQuery(this).attr('rel')).removeAttr('rel');
+	});
+}
+function faviconrestore() {
+	jQuery("link#decreasedproductivity"+timestamp).remove();
+	jQuery("link[data-rel='shortcut icon'], link[data-rel='icon']").each(function() {
+		jQuery(this).attr('rel', jQuery(this).attr('data-rel')).removeAttr('data-rel');
+	});
+}
+function enforceFaviconBlank() {
+    try {
+        // Remove or neutralize any site-provided icons
+        jQuery("link[rel*='icon'], link[rel='shortcut icon'], link[rel='icon'], link[rel='apple-touch-icon'], link[rel='apple-touch-icon-precomposed'], link[rel='mask-icon']").each(function(){
+            try { jQuery(this).attr('data-rel', jQuery(this).attr('rel')).removeAttr('rel'); } catch(_) {}
+        });
+        // Ensure our blank favicon exists
+        faviconblank();
+    } catch(e) {}
+}
+function faviconObserve() {
+    try {
+        if (window.__dp_faviconObserver) window.__dp_faviconObserver.disconnect();
+        var obs = new MutationObserver(function(){ enforceFaviconBlank(); });
+        window.__dp_faviconObserver = obs;
+        obs.observe(document.querySelector('head') || document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['rel','href'] });
+        // Initial enforcement in case icons already present
+        enforceFaviconBlank();
+    } catch(e) {}
+}
+// Favicon Blanking Code END
+function replaceTitle(text) {
+	if (document.title != text) {
+		if (document.title && !origtitle) origtitle = document.title;
+		document.title=text;
+	}
+}
+function titleBind(text) {
+    jQuery('title').unbind('DOMSubtreeModified.decreasedproductivity'+timestamp);
+    jQuery('title').bind('DOMSubtreeModified.decreasedproductivity'+timestamp, function() {
+        replaceTitle(text);
+    });
+    // MutationObserver to persist title against SPA updates
+    try {
+        if (window.__dp_titleObserver) window.__dp_titleObserver.disconnect();
+        var observer = new MutationObserver(function(){ replaceTitle(text); });
+        window.__dp_titleObserver = observer;
+        observer.observe(document.querySelector('head') || document.documentElement, { childList: true, subtree: true });
+        // Timed reinforcement in case title changes without DOM mutation (keep alive while active)
+        if (window.__dp_titleInterval) clearInterval(window.__dp_titleInterval);
+        window.__dp_titleInterval = setInterval(function(){ replaceTitle(text); }, 500);
+        // Hook into SPA navigation APIs
+        if (!history.__dp_patched) {
+            history.__dp_patched = true;
+            ['pushState','replaceState'].forEach(function(m){
+                var orig = history[m];
+                if (typeof orig === 'function') {
+                    history[m] = function(){
+                        var r = orig.apply(this, arguments);
+                        try { replaceTitle(text); } catch(_) {}
+                        return r;
+                    };
+                }
+            });
+            window.addEventListener('popstate', function(){ try { replaceTitle(text); } catch(_) {} });
+        }
+    } catch(e) {}
+}
+function titleRestore() {
+	jQuery('title').unbind('DOMSubtreeModified.decreasedproductivity'+timestamp);
+	if (origtitle) document.title = origtitle;
+}
+function hotkeySet(hotkeyenabled, hotkey, paranoidhotkey) {
+	if (dphotkeylistener) dphotkeylistener.reset();
+	if (hotkeyenabled == 'true' || hotkeyenabled === true) {
+		dphotkeylistener = new window.keypress.Listener();
+		if (hotkey) {
+			dphotkeylistener.simple_combo(hotkey.toLowerCase(), function() {
+				chrome.runtime.sendMessage({reqtype: "toggle"});
+			});
+		}
+		if (paranoidhotkey) {
+			dphotkeylistener.simple_combo(paranoidhotkey.toLowerCase(), function() {
+				chrome.runtime.sendMessage({reqtype: "toggleparanoid"});
+			});
+		}
+		// Native fallback: capture keydown for combos that libraries or browser shortcuts may miss
+        try {
+            if (window.__dp_hotkeys_handler) window.removeEventListener('keydown', window.__dp_hotkeys_handler, true);
+			var normalize = function(s){ return String(s||'').trim().toUpperCase(); };
+			var hk = normalize(hotkey);
+			var phk = normalize(paranoidhotkey);
+            var lastTs = 0;
+            var DEBOUNCE_MS = 350;
+			var matchCombo = function(evt, combo){
+				if (!combo) return false;
+				var parts = combo.split(/\s+/);
+				var needCtrl = parts.indexOf('CTRL') !== -1;
+				var needAlt = parts.indexOf('ALT') !== -1;
+				var needShift = parts.indexOf('SHIFT') !== -1;
+				var key = parts[parts.length-1];
+				var keyOk = false;
+				if (/^F\d{1,2}$/.test(key)) keyOk = (evt.key && evt.key.toUpperCase() === key);
+				else keyOk = (evt.key && evt.key.toUpperCase() === key);
+				return (!!evt.ctrlKey === needCtrl) && (!!evt.altKey === needAlt) && (!!evt.shiftKey === needShift) && keyOk;
+			};
+			window.__dp_hotkeys_handler = function(e){
+				// ignore when typing in inputs
+				var t = e.target;
+				if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+                var now = Date.now();
+                if (now - lastTs < DEBOUNCE_MS) return;
+                if (matchCombo(e, hk)) { lastTs = now; e.preventDefault(); e.stopPropagation(); chrome.runtime.sendMessage({reqtype: "toggle"}); return; }
+                if (matchCombo(e, phk)) { lastTs = now; e.preventDefault(); e.stopPropagation(); chrome.runtime.sendMessage({reqtype: "toggleparanoid"}); return; }
+			};
+			window.addEventListener('keydown', window.__dp_hotkeys_handler, true);
+		} catch(_e) {}
+	}
+}
+// Listen for messages from background script to apply/remove cloak
+chrome.runtime.onMessage.addListener(function(request, sender, sendResponse) {
+	if (request.action === 'applyCloak') {
+		// Apply cloaking - get settings and force application
+		chrome.runtime.sendMessage({reqtype: "get-enabled"}, function(enabledResponse) {
+			if (chrome.runtime.lastError) {
+				sendResponse({success: false, error: chrome.runtime.lastError.message});
+				return;
+			}
+			
+			chrome.runtime.sendMessage({reqtype: "get-settings"}, function(response) {
+				if (chrome.runtime.lastError) {
+					sendResponse({success: false, error: chrome.runtime.lastError.message});
+					return;
+				}
+				
+				// Apply favicon hiding if enabled (handle both boolean and string)
+                if (enabledResponse.favicon === true || enabledResponse.favicon === 'true') {
+                    faviconblank();
+                    faviconObserve();
+				} else {
+					faviconrestore();
+				}
+				
+				// Apply title replacement if enabled (handle both boolean and string)
+                if (enabledResponse.hidePageTitles === true || enabledResponse.hidePageTitles === 'true') {
+                    replaceTitle(enabledResponse.pageTitleText);
+                    titleBind(enabledResponse.pageTitleText);
+				} else {
+					titleRestore();
+				}
+				
+				// Apply the cloak styles
+				addCloak(response.sfwmode, response.font, response.fontsize, response.underline, response.background, response.text, response.table, response.link, response.bold, response.opacity1, response.opacity2, response.collapseimage, response.customcss);
+				dpPostLoad(response.maxheight, response.maxwidth, response.sfwmode, response.bold);
+				
+				// Bind DOM observer for dynamic content
+				jQuery('body').unbind('DOMSubtreeModified.decreasedproductivity'+timestamp);
+				jQuery('body').bind('DOMSubtreeModified.decreasedproductivity'+timestamp, function() {
+					clearTimeout(postloaddelay);
+					postloaddelay = setTimeout(function(){ dpPostLoad(response.maxheight, response.maxwidth, response.sfwmode, response.bold) }, 500);
+				});
+				
+				sendResponse({success: true});
+			});
+		});
+		return true; // Keep channel open for async response
+	} else if (request.action === 'removeCloak') {
+		// Remove cloaking
+		removeCss();
+		sendResponse({success: true});
+		return true;
+	}
+	return false;
+});
+
+// Initially hide all elements on page (injected code is removed when page is loaded)
+chrome.runtime.sendMessage({reqtype: "get-enabled"}, function(response) {
+	jQuery(document).ready(function() {
+		hotkeySet(response.enableToggle, response.hotkey, response.paranoidhotkey);
+	});
+	
+	// Check if tab should be cloaked (not just global enable)
+	chrome.runtime.sendMessage({reqtype: "should-cloak-tab"}, function(shouldCloakResponse) {
+		if (shouldCloakResponse && shouldCloakResponse.shouldCloak) {
+			console.log('[DP] Applying initial stealth to tab:', window.location.href);
+			// Also get favicon and title settings
+			chrome.runtime.sendMessage({reqtype: "get-enabled"}, function(enabledResponse) {
+				if (enabledResponse.favicon == 'true') faviconblank();
+				if (enabledResponse.hidePageTitles == 'true') {
+					replaceTitle(enabledResponse.pageTitleText);
+					titleBind(enabledResponse.pageTitleText);
+				}
+			});
+			var stealth = document.createElement("style");
+			stealth.setAttribute("__decreased__", "initialstealth"+timestamp);
+			stealth.innerText += "html, html *, html *[style], body *:before, body *:after { background-color: #" + response.background + " !important; background-image: none !important; background: #" + response.background+ " !important; } html * { visibility: hidden !important; }";
+			document.documentElement.appendChild(stealth, null);
+			init();
+		} else {
+			// Fallback race protection: if background isn't ready yet, rely on get-enabled snapshot
+            chrome.runtime.sendMessage({reqtype: "get-enabled"}, function(enabledResponse) {
+				if (enabledResponse && (enabledResponse.enable === 'true' || enabledResponse.enable === true)) {
+					console.log('[DP] Applying initial stealth via fallback:', window.location.href);
+					// Also get favicon and title settings
+                    if (enabledResponse.favicon == 'true') { faviconblank(); faviconObserve(); }
+                    if (enabledResponse.hidePageTitles == 'true') { replaceTitle(enabledResponse.pageTitleText); titleBind(enabledResponse.pageTitleText); }
+					var stealth = document.createElement("style");
+					stealth.setAttribute("__decreased__", "initialstealth"+timestamp);
+					stealth.innerText += "html, html *, html *[style], body *:before, body *:after { background-color: #" + response.background + " !important; background-image: none !important; background: #" + response.background+ " !important; } html * { visibility: hidden !important; }";
+					document.documentElement.appendChild(stealth, null);
+                    init();
+				} else {
+					console.log('[DP] Not applying stealth to tab:', window.location.href);
+				}
+			});
+		}
+	});
+});

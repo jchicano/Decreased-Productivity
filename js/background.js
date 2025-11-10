@@ -11,6 +11,10 @@ var contextLoaded = false;
 var dpicon, dptitle;
 var blackList, whiteList;
 
+// Treat boolean-like values uniformly (supports string and boolean)
+function isTrue(v) { return v === 'true' || v === true; }
+function isFalse(v) { return v === 'false' || v === false; }
+
 // ===== localStorage SHIM for Service Worker (MV3) =====
 // Service workers don't have access to localStorage, so we create a synchronous-like wrapper
 // This initializes a cache that syncs with chrome.storage.local
@@ -88,6 +92,12 @@ chrome.storage.onChanged.addListener(function(changes, areaName) {
 	if (areaName === 'local') {
 		for (let key in changes) {
 			localStorageCache[key] = changes[key].newValue;
+			
+			// Refresh lists when whiteList or blackList changes
+			if (key === 'whiteList' || key === 'blackList') {
+				console.log('[BG] List changed, refreshing:', key);
+				initLists();
+			}
 		}
 	}
 });
@@ -97,7 +107,13 @@ chrome.storage.onChanged.addListener(function(changes, areaName) {
 function enabled(tab, dpcloakindex) {
 	var dpdomaincheck = domainCheck(extractDomainFromURL(tab.url));
 	var dpcloakindex = dpcloakindex || cloakedTabs.indexOf(tab.windowId+"|"+tab.id);
-	if ((localStorage["enable"] == "true" || dpdomaincheck == '1') && dpdomaincheck != '0' && (localStorage["global"] == "true" || (localStorage["global"] == "false" && (dpcloakindex != -1 || localStorage["newPages"] == "Cloak" || dpdomaincheck == '1')))) return 'true';
+    var dpTabId = tab.windowId+"|"+tab.id;
+    var dpuncloakindex = uncloakedTabs.indexOf(dpTabId);
+    // Per-tab override: if user explicitly uncloaked this tab, keep it uncloaked
+    if (dpuncloakindex !== -1) return 'false';
+    if ((isTrue(localStorage["enable"]) || dpdomaincheck == '1')
+        && dpdomaincheck != '0'
+        && (isTrue(localStorage["global"]) || (isFalse(localStorage["global"]) && (dpcloakindex != -1 || localStorage["newPages"] == "Cloak" || dpdomaincheck == '1')))) return 'true';
 	return 'false';
 }
 function domainCheck(domain) {
@@ -173,21 +189,39 @@ function domainHandler(domain,action) {
 		switch(action) {
 			case 0:	// Whitelist
 				tempWhitelist.push(domain);
+				console.log('[BG] Added to whitelist:', domain);
 				break;
 			case 1:	// Blacklist
 				tempBlacklist.push(domain);
+				console.log('[BG] Added to blacklist:', domain);
 				break;
 			case 2:	// Remove
+				console.log('[BG] Removed domain:', domain);
 				break;
 		}
 		
-		localStorage['blackList'] = JSON.stringify(tempBlacklist);
-		localStorage['whiteList'] = JSON.stringify(tempWhitelist);
+		// Save to both localStorage and chrome.storage.local
+		var blackListJson = JSON.stringify(tempBlacklist);
+		var whiteListJson = JSON.stringify(tempWhitelist);
+		
+		localStorage['blackList'] = blackListJson;
+		localStorage['whiteList'] = whiteListJson;
+		
+		// Also save to chrome.storage.local to trigger sync
+		chrome.storage.local.set({
+			'blackList': blackListJson,
+			'whiteList': whiteListJson
+		});
+		
+		// Update global arrays immediately
 		blackList = tempBlacklist.sort();
 		whiteList = tempWhitelist.sort();
+		
+		console.log('[BG] Lists updated. Whitelist:', whiteList.length, 'Blacklist:', blackList.length);
+		
 		return true;
 	} catch(e) {
-		console.error('Error in domainHandler:', e);
+		console.error('[BG] Error in domainHandler:', e);
 		return false;
 	}
 }
@@ -329,12 +363,32 @@ function checkChrome(url) {
 	return false;
 }
 function hotkeyChange() {
+	console.log('[BG] Hotkey change triggered. Settings:', {
+		enableToggle: localStorage["enableToggle"],
+		hotkey: localStorage["hotkey"],
+		paranoidhotkey: localStorage["paranoidhotkey"]
+	});
+	
 	chrome.windows.getAll({"populate":true}, function(windows) {
 		windows.map(function(window) {
 			window.tabs.map(function(tab) {
-				if (!checkChrome(tab.url)) chrome.scripting.executeScript({target: {tabId: tab.id}, func: function(enableToggle, hotkey, paranoidhotkey) {
-					if (typeof hotkeySet === 'function') hotkeySet(enableToggle, hotkey, paranoidhotkey);
-				}, args: [localStorage["enableToggle"], localStorage["hotkey"], localStorage["paranoidhotkey"]]}).catch(() => {});
+				if (!checkChrome(tab.url)) {
+					chrome.scripting.executeScript({
+						target: {tabId: tab.id}, 
+						func: function(enableToggle, hotkey, paranoidhotkey) {
+							console.log('[DP] Hotkey settings received:', {enableToggle, hotkey, paranoidhotkey});
+							if (typeof hotkeySet === 'function') {
+								hotkeySet(enableToggle, hotkey, paranoidhotkey);
+								console.log('[DP] Hotkeys updated');
+							} else {
+								console.log('[DP] hotkeySet function not available');
+							}
+						}, 
+						args: [localStorage["enableToggle"], localStorage["hotkey"], localStorage["paranoidhotkey"]]
+					}).catch((e) => {
+						console.log('[BG] Could not inject hotkeys into tab', tab.id, ':', e.message);
+					});
+				}
 			});
 		});
 	});
@@ -386,13 +440,14 @@ function recursiveCloak(enable, global, tabId) {
 function magician(enable, tabId) {
 	// Send simple message to content script to apply or remove cloak
 	// The content script will handle getting all settings and applying them correctly
+	console.log('[BG] magician called:', enable, 'tab:', tabId);
 	if (enable == 'true') {
-		chrome.tabs.sendMessage(tabId, {action: 'applyCloak'}).catch(() => {
-			// Silently ignore errors (e.g., tab closed, restricted page)
+		chrome.tabs.sendMessage(tabId, {action: 'applyCloak'}).catch((err) => {
+			console.log('[BG] Could not send applyCloak to tab', tabId, ':', err.message);
 		});
 	} else {
-		chrome.tabs.sendMessage(tabId, {action: 'removeCloak'}).catch(() => {
-			// Silently ignore errors
+		chrome.tabs.sendMessage(tabId, {action: 'removeCloak'}).catch((err) => {
+			console.log('[BG] Could not send removeCloak to tab', tabId, ':', err.message);
 		});
 	}
 	if (localStorage["showIcon"] == 'true') {
@@ -459,41 +514,50 @@ function initLists() {
 		localStorage['whiteList'] = JSON.stringify([]);
 	}
 	
-	try {
-		blackList = JSON.parse(localStorage['blackList']).sort();
-		whiteList = JSON.parse(localStorage['whiteList']).sort();
-	} catch(e) {
-		console.error('[BG] Error parsing lists, resetting:', e);
-		localStorage['blackList'] = JSON.stringify([]);
-		localStorage['whiteList'] = JSON.stringify([]);
-		blackList = [];
-		whiteList = [];
-	}
+		try {
+			blackList = JSON.parse(localStorage['blackList']).sort();
+			whiteList = JSON.parse(localStorage['whiteList']).sort();
+			console.log('[BG] Lists initialized. Whitelist:', whiteList.length, 'domains:', whiteList);
+			console.log('[BG] Lists initialized. Blacklist:', blackList.length, 'domains:', blackList);
+		} catch(e) {
+			console.error('[BG] Error parsing lists, resetting:', e);
+			localStorage['blackList'] = JSON.stringify([]);
+			localStorage['whiteList'] = JSON.stringify([]);
+			blackList = [];
+			whiteList = [];
+		}
 }
 // ----- Request library to support content script communication
 chrome.tabs.onUpdated.addListener(function(tabid, changeinfo, tab) {
 	if (changeinfo.status == "loading") {
 		var dpTabId = tab.windowId+"|"+tabid;
 		var dpcloakindex = cloakedTabs.indexOf(dpTabId);
+		var dpuncloakindex = uncloakedTabs.indexOf(dpTabId);
 		var enable = enabled(tab, dpcloakindex);
+		
+		// Update icon based on current state
 		if (localStorage["showIcon"] == "true") {
 			try {
 				if (enable == "true") chrome.action.setIcon({path: "/img/addressicon/"+dpicon+".png", tabId: tabid});
 				else chrome.action.setIcon({path: "/img/addressicon/"+dpicon+"-disabled.png", tabId: tabid});
 				chrome.action.setTitle({title: dptitle, tabId: tabid});
 			} catch(e) {
-				// Silently ignore icon errors
+				// Silently ignore icon errors (incognito restrictions)
 			}
-			// Note: chrome.action.show/hide don't exist in MV3
 		}
+		
+		// Skip chrome:// pages
 		if (checkChrome(tab.url)) return;
-		var dpuncloakindex = uncloakedTabs.indexOf(dpTabId);
+		
+		// Apply cloak if needed and update tab tracking arrays
 		if (enable == "true") {
 			magician('true', tabid);
 			if (localStorage["global"] == "false" && localStorage["enable"] == "false") localStorage["enable"] = "true";
+			// Ensure tab is tracked as cloaked
 			if (dpcloakindex == -1) cloakedTabs.push(dpTabId);
 			if (dpuncloakindex != -1) uncloakedTabs.splice(dpuncloakindex, 1);
 		} else {
+			// Handle stickiness for new tabs
 			if (localStorage["enableStickiness"] == "true") {
 				if (tab.openerTabId) {
 					if (cloakedTabs.indexOf(tab.windowId+"|"+tab.openerTabId) != -1 && dpuncloakindex == -1) {
@@ -518,6 +582,10 @@ chrome.tabs.onUpdated.addListener(function(tabid, changeinfo, tab) {
 						if (dpcloakindex != -1) cloakedTabs.splice(dpcloakindex, 1);
 					});
 				}
+			} else {
+				// No stickiness - just track as uncloaked
+				if (dpuncloakindex == -1) uncloakedTabs.push(dpTabId);
+				if (dpcloakindex != -1) cloakedTabs.splice(dpcloakindex, 1);
 			}
 		}
 	}
@@ -528,6 +596,46 @@ chrome.tabs.onRemoved.addListener(function(tabid, windowInfo) {
 	var dpuncloakindex = uncloakedTabs.indexOf(dpTabId);
 	if (dpcloakindex != -1) cloakedTabs.splice(dpcloakindex, 1);
 	if (dpuncloakindex != -1) uncloakedTabs.splice(dpuncloakindex, 1);
+});
+
+// Add listeners for tab activation and window focus to update icons
+chrome.tabs.onActivated.addListener(function(activeInfo) {
+	if (localStorage["showIcon"] == "true") {
+		try {
+			var dpTabId = activeInfo.windowId + "|" + activeInfo.tabId;
+			var dpcloakindex = cloakedTabs.indexOf(dpTabId);
+			if (dpcloakindex != -1) {
+				chrome.action.setIcon({path: "/img/addressicon/"+dpicon+".png", tabId: activeInfo.tabId});
+			} else {
+				chrome.action.setIcon({path: "/img/addressicon/"+dpicon+"-disabled.png", tabId: activeInfo.tabId});
+			}
+			chrome.action.setTitle({title: dptitle, tabId: activeInfo.tabId});
+		} catch(e) {
+			// Silently ignore icon errors (incognito restrictions)
+		}
+	}
+});
+
+chrome.windows.onFocusChanged.addListener(function(windowId) {
+	if (windowId == chrome.windows.WINDOW_ID_NONE) return;
+	if (localStorage["showIcon"] == "true") {
+		chrome.tabs.query({active: true, windowId: windowId}, function(tabs) {
+			if (tabs.length > 0) {
+				try {
+					var dpTabId = windowId + "|" + tabs[0].id;
+					var dpcloakindex = cloakedTabs.indexOf(dpTabId);
+					if (dpcloakindex != -1) {
+						chrome.action.setIcon({path: "/img/addressicon/"+dpicon+".png", tabId: tabs[0].id});
+					} else {
+						chrome.action.setIcon({path: "/img/addressicon/"+dpicon+"-disabled.png", tabId: tabs[0].id});
+					}
+					chrome.action.setTitle({title: dptitle, tabId: tabs[0].id});
+				} catch(e) {
+					// Silently ignore icon errors (incognito restrictions)
+				}
+			}
+		});
+	}
 });
 var requestDispatchTable = {
 	"get-enabled": function(request, sender, sendResponse) {
@@ -605,6 +713,55 @@ var requestDispatchTable = {
 	},
 	"ping": function(request, sender, sendResponse) {
 		sendResponse({pong: true});
+	},
+	"get-domain-status": function(request, sender, sendResponse) {
+		// Returns domain and domainCheck result for the sender tab URL
+		(async () => {
+			try {
+				if (!storageInitialized) await initializeStorage();
+				if (!blackList || !whiteList) initLists();
+				var url = (sender && sender.tab && sender.tab.url) ? sender.tab.url : (request && request.url) ? request.url : '';
+				var domain = extractDomainFromURL(url);
+				var result = domainCheck(domain);
+				sendResponse({domain: domain, result: result});
+			} catch(e) {
+				sendResponse({domain: '', result: '-1'});
+			}
+		})();
+		return true;
+	},
+	"should-cloak-tab": function(request, sender, sendResponse) {
+		// Ensure storage and lists are initialized before answering
+		const ensureReady = async () => {
+			if (!storageInitialized) {
+				await initializeStorage();
+			}
+			if (!blackList || !whiteList) {
+				initLists();
+			}
+		};
+		
+		(async () => {
+			try {
+				if (!sender.tab) {
+					sendResponse({shouldCloak: false});
+					return;
+				}
+				await ensureReady();
+				var dpTabId = sender.tab.windowId + "|" + sender.tab.id;
+				var dpcloakindex = cloakedTabs.indexOf(dpTabId);
+				var domain = extractDomainFromURL(sender.tab.url);
+				var domainCheckResult = domainCheck(domain);
+				var enable = enabled(sender.tab, dpcloakindex);
+				console.log('[BG] Should cloak tab?', sender.tab.url, '→', enable);
+				console.log('[BG] Domain:', domain, 'DomainCheck:', domainCheckResult, 'CloakIndex:', dpcloakindex);
+				console.log('[BG] BlackList:', blackList, 'WhiteList:', whiteList);
+				sendResponse({shouldCloak: enable === 'true'});
+			} catch(e) {
+				console.log('[BG] should-cloak-tab error:', e && e.message ? e.message : e);
+				sendResponse({shouldCloak: false});
+			}
+		})();
 	}
 }
 // ===== REGISTER MESSAGE LISTENER FIRST (CRITICAL) =====

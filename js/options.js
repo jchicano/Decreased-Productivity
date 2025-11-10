@@ -8,6 +8,34 @@ var bkg = null;
 var error = false;
 var oldglobalstate = false;
 var settingnames = [];
+// Normalize user input to a hostname (lowercase, no port, no path)
+function extractHostnameFromInput(input) {
+	try {
+		if (!input) return '';
+		var raw = String(input).trim();
+		if (!raw) return '';
+		var lower = raw.toLowerCase();
+		if (/^[a-z]+:\/\//.test(lower) || /^\/\//.test(lower)) {
+			var withProto = lower.startsWith('//') ? ('http:' + lower) : lower;
+			var u = new URL(withProto);
+			return u.hostname || '';
+		}
+		lower = lower.replace(/^[a-z]+:\/\//, '');
+		var atIndex = lower.indexOf('@');
+		if (atIndex !== -1) lower = lower.slice(atIndex + 1);
+		var slashIndex = lower.indexOf('/');
+		if (slashIndex !== -1) lower = lower.slice(0, slashIndex);
+		if (/^\[[0-9a-f:.]+\]/i.test(lower)) {
+			var end = lower.indexOf(']');
+			return end !== -1 ? lower.slice(0, end + 1) : '';
+		}
+		var colonIndex = lower.indexOf(':');
+		if (colonIndex !== -1) lower = lower.slice(0, colonIndex);
+		return lower;
+	} catch(e) {
+		return '';
+	}
+}
 document.addEventListener('DOMContentLoaded', function () {
 	$("#tabs").tabs();
 	$("#o1").slider({min: 0, max: 1, step: 0.05, slide: function(event, ui) { $("#opacity1").val(ui.value); opacitytest(); }, stop: function(event, ui) { 
@@ -577,45 +605,53 @@ function stylePreset(s) {
 
 // <!-- modified from KB SSL Enforcer: https://code.google.com/p/kbsslenforcer/
 function addList(type) {
-	var domain = $('#url').val();
-	domain = domain.toLowerCase();
-	
-	// Check if domain is empty
-	if (!domain || domain.trim() === '') {
-		$('#listMsg').html(chrome.i18n.getMessage("invaliddomain")).stop().fadeIn("slow").delay(2000).fadeOut("slow");
-		return false;
-	}
-	
-	// Validate domain format
-	if (!domain.match(/^(?:[\-\w\*\?]+(\.[\-\w\*\?]+)*|((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[0-9]{1,2})\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[0-9]{1,2})|\[[A-Fa-f0-9:.]+\])$/)) {
-		$('#listMsg').html(chrome.i18n.getMessage("invaliddomain")).stop().fadeIn("slow").delay(2000).fadeOut("slow");
-		return false;
-	}
-	
-	// Send message to background to add domain
-	chrome.runtime.sendMessage({action: "domainHandler", domain: domain, type: type}, function(response) {
-		if (chrome.runtime.lastError) {
-			$('#listMsg').html('Error: ' + chrome.runtime.lastError.message).stop().fadeIn("slow").delay(3000).fadeOut("slow");
-			return;
-		}
-		
-		// Check if response indicates success
-		if (!response || !response.success) {
-			$('#listMsg').html('Error adding domain').stop().fadeIn("slow").delay(3000).fadeOut("slow");
-			return;
-		}
-		
-		// Wait for background to update localStorage before refreshing list
-		$('#url').val('');
-		$('#listMsg').html([chrome.i18n.getMessage("whitelisted"),chrome.i18n.getMessage("blacklisted")][type]+' '+domain+'.').stop().fadeIn("slow").delay(2000).fadeOut("slow");
-		// Small delay to ensure localStorage is synced
-		setTimeout(function() {
-			listUpdate();
-		}, 100);
-		$('#url').focus();
-	});
-	
-	return false;
+    var domain = $('#url').val();
+    var normalized = extractHostnameFromInput(domain);
+    if (!normalized) {
+        $('#listMsg').html(chrome.i18n.getMessage("invaliddomain")).stop().fadeIn("slow").delay(2000).fadeOut("slow");
+        return false;
+    }
+    if (normalized !== String(domain).trim().toLowerCase()) {
+        $('#url').val(normalized);
+    }
+    domain = normalized;
+    
+    // Check if domain is empty
+    if (!domain || domain.trim() === '') {
+        $('#listMsg').html(chrome.i18n.getMessage("invaliddomain")).stop().fadeIn("slow").delay(2000).fadeOut("slow");
+        return false;
+    }
+    
+    // Validate domain format
+    if (!domain.match(/^(?:[\-\w\*\?]+(\.[\-\w\*\?]+)*|((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[0-9]{1,2})\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[0-9]{1,2})|\[[A-Fa-f0-9:.]+\])$/)) {
+        $('#listMsg').html(chrome.i18n.getMessage("invaliddomain")).stop().fadeIn("slow").delay(2000).fadeOut("slow");
+        return false;
+    }
+    
+    // Send message to background to add domain
+    chrome.runtime.sendMessage({action: "domainHandler", domain: domain, type: type}, function(response) {
+        if (chrome.runtime.lastError) {
+            $('#listMsg').html('Error: ' + chrome.runtime.lastError.message).stop().fadeIn("slow").delay(3000).fadeOut("slow");
+            return;
+        }
+        
+        // Check if response indicates success
+        if (!response || !response.success) {
+            $('#listMsg').html('Error adding domain').stop().fadeIn("slow").delay(3000).fadeOut("slow");
+            return;
+        }
+        
+        // Wait for background to update localStorage before refreshing list
+        $('#url').val('');
+        $('#listMsg').html([chrome.i18n.getMessage("whitelisted"),chrome.i18n.getMessage("blacklisted")][type]+' '+domain+'.').stop().fadeIn("slow").delay(2000).fadeOut("slow");
+        // Small delay to ensure localStorage is synced
+        setTimeout(function() {
+            listUpdate();
+        }, 100);
+        $('#url').focus();
+    });
+    
+    return false;
 }
 function domainRemover(domain) {
 	chrome.runtime.sendMessage({action: "domainHandler", domain: domain, type: 2}, function(response) {
