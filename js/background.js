@@ -63,6 +63,56 @@ async function initializeExtension() {
 	} catch(e) {
 		console.error('[DP] Error initializing extension:', e);
 	}
+	syncPrestealth();
+}
+
+// ----- Pre-stealth
+// The content script needs a round trip to the service worker before it can cloak a page, and
+// waking an idle service worker takes long enough for images to be painted first. For pages
+// that are expected to be cloaked, register a document_start stylesheet that keeps the page
+// hidden until the content script marks it ready (see css/prestealth.css).
+var PRESTEALTH_ID = 'dp-prestealth';
+var prestealthQueue = Promise.resolve();
+// Convert a list entry into match patterns; entries that cannot be expressed are skipped
+// (those pages are still cloaked, just without pre-stealth).
+function listEntryToPatterns(entry) {
+	entry = String(entry || '').trim().toLowerCase();
+	var host = /^[a-z0-9-]+(?:\.[a-z0-9-]+)*$/;
+	if (host.test(entry)) {
+		var patterns = ['*://' + entry + '/*'];
+		if (entry.indexOf('www.') !== 0) patterns.push('*://www.' + entry + '/*');
+		return patterns;
+	}
+	if (entry.indexOf('*.') === 0 && host.test(entry.substring(2))) return ['*://' + entry + '/*'];
+	return [];
+}
+function prestealthMatches() {
+	var matches = [];
+	if (isTrue(localStorage["enable"]) && (isTrue(localStorage["global"]) || localStorage["newPages"] == "Cloak")) {
+		matches = ['http://*/*', 'https://*/*'];
+	} else {
+		blackList.forEach(function(d) { matches = matches.concat(listEntryToPatterns(d)); });
+	}
+	var exclude = [];
+	whiteList.forEach(function(d) { exclude = exclude.concat(listEntryToPatterns(d)); });
+	return {matches: matches, excludeMatches: exclude};
+}
+function syncPrestealth() {
+	if (!chrome.scripting || !chrome.scripting.registerContentScripts) return Promise.resolve();
+	prestealthQueue = prestealthQueue.then(async function() {
+		var m = prestealthMatches();
+		var existing = await chrome.scripting.getRegisteredContentScripts({ids: [PRESTEALTH_ID]});
+		if (!m.matches.length) {
+			if (existing.length) await chrome.scripting.unregisterContentScripts({ids: [PRESTEALTH_ID]});
+			return;
+		}
+		var script = {id: PRESTEALTH_ID, matches: m.matches, excludeMatches: m.excludeMatches, css: ['css/prestealth.css'], runAt: 'document_start', allFrames: true, persistAcrossSessions: true};
+		if (existing.length) await chrome.scripting.updateContentScripts([script]);
+		else await chrome.scripting.registerContentScripts([script]);
+	}).catch(function(e) {
+		console.error('[DP] Could not update pre-stealth:', e);
+	});
+	return prestealthQueue;
 }
 
 async function restoreTabState() {
@@ -462,6 +512,7 @@ chrome.storage.onChanged.addListener(function(changes, areaName) {
 		if ('whiteList' in changes || 'blackList' in changes) initLists();
 		if ('iconType' in changes || 'iconTitle' in changes) setDPIcon();
 		if ('showContext' in changes) initializeContextMenus();
+		if ('whiteList' in changes || 'blackList' in changes || 'enable' in changes || 'global' in changes || 'newPages' in changes) syncPrestealth();
 	});
 });
 
