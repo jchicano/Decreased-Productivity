@@ -18,7 +18,7 @@
       "48": "img/icon48.png"
    },
    "manifest_version": 3,
-   "minimum_chrome_version": "88",
+   "minimum_chrome_version": "102",
    "name": "Decreased Productivity",
    "options_page": "options.html",
    "action": {
@@ -27,5 +27,5 @@
    },
    "permissions": [ "contextMenus", "tabs", "scripting", "storage" ],
    "host_permissions": [ "http://*/*", "https://*/*" ],
-   "version": "0.47.0.1"
+   "version": "0.47.0.2"
 }
