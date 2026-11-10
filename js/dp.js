@@ -114,7 +114,12 @@ function addCloak(sfw, f, fsize, u, bg, text, table, link, bold, o1, o2, collaps
 	else if (curlocation.match(/^https?:\/\/.+\.(?:wikia|fandom)\.com\//i)) {
 		magic += " body.background-dynamic.skin-oasis::after, body.background-dynamic.skin-oasis::before { background-image: none !important; } ";
 	}
-	if (customcss) magic += ' ' + String(customcss).replace(/(?:\r\n|\r|\n)/g, ' ');
+	// Wrap the cloak in a cascade layer. For !important declarations, layered rules win over
+	// unlayered ones regardless of specificity, so the cloak also beats site rules such as
+	// Bootstrap's `.bg-dark { background-color: ... !important }`. Custom CSS goes into a layer
+	// declared first, so its !important rules still override the cloak.
+	magic = '@layer dpcustom' + timestamp + ', dpcloak' + timestamp + '; @layer dpcloak' + timestamp + ' { ' + magic + ' } ';
+	if (customcss) magic += '@layer dpcustom' + timestamp + ' { ' + String(customcss).replace(/(?:\r\n|\r|\n)/g, ' ') + ' } ';
 
 	// Replace any previous cloak (settings may have changed) and drop the initial stealth
 	removeCloakStyle();
