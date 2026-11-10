@@ -2,118 +2,130 @@
 // Icon by dunedhel: http://dunedhel.deviantart.com/
 // Supporting functions by AdThwart - T. Joseph
 
-//'use strict'; - enable after testing
-// Version is now available from manifest directly
-var version = "0.47.0.1";
-var cloakedTabs = [];
-var uncloakedTabs = [];
-var contextLoaded = false;
-var dpicon, dptitle;
-var blackList, whiteList;
+// Version comes straight from the manifest so it never drifts.
+var version = chrome.runtime.getManifest().version;
 
-// Treat boolean-like values uniformly (supports string and boolean)
-function isTrue(v) { return v === 'true' || v === true; }
-function isFalse(v) { return v === 'false' || v === false; }
+// Per-tab state, keyed by tab id. Service workers are terminated when idle, so this
+// state is mirrored to chrome.storage.session and restored on start-up.
+var cloakedTabs = [];      // tabs that are currently cloaked
+var uncloakedTabs = [];    // tabs that are currently not cloaked (used for stickiness)
+var manualUncloak = {};    // tabId -> domain the user explicitly uncloaked on that tab
+var dpicon = 'coffee', dptitle = 'Decreased Productivity';
+var blackList = [], whiteList = [];
 
-// ===== localStorage SHIM for Service Worker (MV3) =====
-// Service workers don't have access to localStorage, so we create a synchronous-like wrapper
-// This initializes a cache that syncs with chrome.storage.local
+// ===== Settings cache (MV3 service workers have no window.localStorage) =====
+// Settings live in chrome.storage.local. They are cached in memory so the rest of the
+// code can keep reading them synchronously through the `localStorage` proxy below.
 var localStorageCache = {};
-var storageInitialized = false;
 
-// Initialize storage cache from chrome.storage.local
-async function initializeStorage() {
-	try {
-		const data = await chrome.storage.local.get(null);
-		localStorageCache = data || {};
-		storageInitialized = true;
+// Older builds of the options page saved checkboxes as real booleans, while this file
+// compares against the strings 'true' / 'false' everywhere. Normalise on read.
+function normalizeValue(v) {
+	return (typeof v === 'boolean') ? String(v) : v;
+}
+
+var localStorage = new Proxy({}, {
+	get: function(target, prop) {
+		return normalizeValue(localStorageCache[prop]);
+	},
+	set: function(target, prop, value) {
+		localStorageCache[prop] = value;
+		chrome.storage.local.set({[prop]: value}).catch(function(e) { console.error('[DP] Error saving setting', prop, e); });
 		return true;
+	},
+	deleteProperty: function(target, prop) {
+		delete localStorageCache[prop];
+		chrome.storage.local.remove(prop).catch(function(e) { console.error('[DP] Error removing setting', prop, e); });
+		return true;
+	},
+	has: function(target, prop) {
+		return prop in localStorageCache;
+	}
+});
+
+function isTrue(v) { return v === 'true' || v === true; }
+
+// ===== Initialisation =====
+// Every event handler awaits `ready` so nothing runs against an empty cache right
+// after the service worker has been (re)started.
+var ready = initializeExtension();
+
+async function initializeExtension() {
+	try {
+		localStorageCache = (await chrome.storage.local.get(null)) || {};
+		await restoreTabState();
+		setDefaultOptions();
+		initLists();
+		dpicon = localStorage["iconType"] || 'coffee';
+		dptitle = localStorage["iconTitle"] || 'Decreased Productivity';
+		if (localStorage["version"] != version) localStorage["version"] = version;
 	} catch(e) {
-		console.error('Error initializing storage:', e);
-		return false;
+		console.error('[DP] Error initializing extension:', e);
 	}
 }
 
-// Synchronous localStorage replacement using cache
-var localStorage = {
-	getItem: function(key) {
-		return localStorageCache[key];
-	},
-	setItem: function(key, value) {
-		localStorageCache[key] = value;
-		// Async save to chrome.storage.local (fire and forget)
-		chrome.storage.local.set({[key]: value}).catch(e => console.error('Error saving to storage:', e));
-	},
-	removeItem: function(key) {
-		delete localStorageCache[key];
-		chrome.storage.local.remove(key).catch(e => console.error('Error removing from storage:', e));
-	},
-	clear: function() {
-		localStorageCache = {};
-		chrome.storage.local.clear().catch(e => console.error('Error clearing storage:', e));
+async function restoreTabState() {
+	try {
+		if (!chrome.storage.session) return;
+		var saved = await chrome.storage.session.get(['cloakedTabs', 'uncloakedTabs', 'manualUncloak']);
+		if (Array.isArray(saved.cloakedTabs)) cloakedTabs = saved.cloakedTabs;
+		if (Array.isArray(saved.uncloakedTabs)) uncloakedTabs = saved.uncloakedTabs;
+		if (saved.manualUncloak && typeof saved.manualUncloak === 'object') manualUncloak = saved.manualUncloak;
+	} catch(e) {
+		console.error('[DP] Could not restore tab state:', e);
 	}
-};
+}
 
-// Make bracket notation work
-Object.defineProperty(localStorage, '__proto__', {
-	get: function() { return localStorageCache; },
-	set: function(obj) { 
-		for (let key in obj) {
-			if (obj.hasOwnProperty(key)) {
-				this.setItem(key, obj[key]);
-			}
-		}
-	}
-});
+var persistTimer = null;
+function persistTabState() {
+	if (!chrome.storage.session) return;
+	clearTimeout(persistTimer);
+	persistTimer = setTimeout(function() {
+		chrome.storage.session.set({cloakedTabs: cloakedTabs, uncloakedTabs: uncloakedTabs, manualUncloak: manualUncloak})
+			.catch(function(e) { console.error('[DP] Could not save tab state:', e); });
+	}, 50);
+}
 
-// Proxy to enable localStorage["key"] = value syntax
-var localStorageProxy = new Proxy(localStorage, {
-	get: function(target, prop) {
-		if (prop in target) {
-			return typeof target[prop] === 'function' ? target[prop].bind(target) : target[prop];
-		}
-		return localStorageCache[prop];
-	},
-	set: function(target, prop, value) {
-		if (prop in target && typeof target[prop] === 'function') {
-			return false;
-		}
-		localStorageCache[prop] = value;
-		chrome.storage.local.set({[prop]: value}).catch(e => console.error('Error saving to storage:', e));
-		return true;
-	}
-});
-
-// Replace global reference
-localStorage = localStorageProxy;
-
-// Listen for changes in chrome.storage.local and update cache
-chrome.storage.onChanged.addListener(function(changes, areaName) {
-	if (areaName === 'local') {
-		for (let key in changes) {
-			localStorageCache[key] = changes[key].newValue;
-			
-			// Refresh lists when whiteList or blackList changes
-			if (key === 'whiteList' || key === 'blackList') {
-				console.log('[BG] List changed, refreshing:', key);
-				initLists();
-			}
-		}
-	}
-});
+// ----- Tab state helpers
+function markCloaked(tabId) {
+	var i = uncloakedTabs.indexOf(tabId);
+	if (i != -1) uncloakedTabs.splice(i, 1);
+	if (cloakedTabs.indexOf(tabId) == -1) cloakedTabs.push(tabId);
+	persistTabState();
+}
+function markUncloaked(tabId) {
+	var i = cloakedTabs.indexOf(tabId);
+	if (i != -1) cloakedTabs.splice(i, 1);
+	if (uncloakedTabs.indexOf(tabId) == -1) uncloakedTabs.push(tabId);
+	persistTabState();
+}
+function forgetTab(tabId) {
+	var i = cloakedTabs.indexOf(tabId);
+	if (i != -1) cloakedTabs.splice(i, 1);
+	i = uncloakedTabs.indexOf(tabId);
+	if (i != -1) uncloakedTabs.splice(i, 1);
+	delete manualUncloak[tabId];
+	persistTabState();
+}
+function isCloakedTab(tabId) { return cloakedTabs.indexOf(tabId) != -1; }
 
 // ----- Supporting Functions
 
-function enabled(tab, dpcloakindex) {
-	var dpdomaincheck = domainCheck(extractDomainFromURL(tab.url));
-	var dpcloakindex = dpcloakindex || cloakedTabs.indexOf(tab.windowId+"|"+tab.id);
-    var dpTabId = tab.windowId+"|"+tab.id;
-    var dpuncloakindex = uncloakedTabs.indexOf(dpTabId);
-    // Per-tab override: if user explicitly uncloaked this tab, keep it uncloaked
-    if (dpuncloakindex !== -1) return 'false';
-    if ((isTrue(localStorage["enable"]) || dpdomaincheck == '1')
-        && dpdomaincheck != '0'
-        && (isTrue(localStorage["global"]) || (isFalse(localStorage["global"]) && (dpcloakindex != -1 || localStorage["newPages"] == "Cloak" || dpdomaincheck == '1')))) return 'true';
+// Decide whether a tab should be cloaked. Returns 'true' or 'false'.
+function enabled(tab) {
+	if (!tab || !isCloakableUrl(tab.url)) return 'false';
+	var domain = extractDomainFromURL(tab.url);
+	var dpdomaincheck = domainCheck(domain);
+	// Whitelisted domains are never cloaked.
+	if (dpdomaincheck == '0') return 'false';
+	// The user explicitly uncloaked this tab while on this domain: respect that until
+	// the tab moves to another domain.
+	if (manualUncloak[tab.id] && manualUncloak[tab.id] === domain) return 'false';
+	// Blacklisted domains are always cloaked.
+	if (dpdomaincheck == '1') return 'true';
+	if (!isTrue(localStorage["enable"])) return 'false';
+	if (isTrue(localStorage["global"])) return 'true';
+	if (isCloakedTab(tab.id) || localStorage["newPages"] == "Cloak") return 'true';
 	return 'false';
 }
 function domainCheck(domain) {
@@ -124,41 +136,28 @@ function domainCheck(domain) {
 }
 function in_array(needle, haystack) {
 	if (!haystack || !needle) return false;
+	needle = needle.toLowerCase();
 	if (binarySearch(haystack, needle) != -1) return '1';
 	if (needle.indexOf('www.') == 0) {
 		if (binarySearch(haystack, needle.substring(4)) != -1) return '1';
 	}
-	for (var i in haystack) {
+	for (var i = 0; i < haystack.length; i++) {
 		if (haystack[i].indexOf("*") == -1 && haystack[i].indexOf("?") == -1) continue;
 		if (new RegExp('^(?:www\\.|^)(?:'+haystack[i].replace(/\./g, '\\.').replace(/^\[/, '\\[').replace(/\]$/, '\\]').replace(/\?/g, '.').replace(/\*/g, '[^.]+')+')').test(needle)) return '1';
 	}
 	return false;
 }
 function binarySearch(list, item) {
-    var min = 0;
-    var max = list.length - 1;
-    var guess;
-	var bitwise = (max <= 2147483647) ? true : false;
-	if (bitwise) {
-		while (min <= max) {
-			guess = (min + max) >> 1;
-			if (list[guess] === item) { return guess; }
-			else {
-				if (list[guess] < item) { min = guess + 1; }
-				else { max = guess - 1; }
-			}
-		}
-	} else {
-		while (min <= max) {
-			guess = Math.floor((min + max) / 2);
-			if (list[guess] === item) { return guess; }
-			else {
-				if (list[guess] < item) { min = guess + 1; }
-				else { max = guess - 1; }
-			}
-		}
+	var min = 0;
+	var max = list.length - 1;
+	var guess;
+	while (min <= max) {
+		guess = (min + max) >> 1;
+		if (list[guess] === item) return guess;
+		if (list[guess] < item) min = guess + 1;
+		else max = guess - 1;
 	}
-    return -1;
+	return -1;
 }
 function extractDomainFromURL(url) {
 	if (!url) return "";
@@ -167,61 +166,43 @@ function extractDomainFromURL(url) {
 	if (url.indexOf("@") != -1) url = url.substr(url.indexOf("@") + 1);
 	if (url.match(/^(?:\[[A-Fa-f0-9:.]+\])(:[0-9]+)?$/g)) {
 		if (url.indexOf("]:") != -1) return url.substr(0, url.indexOf("]:")+1);
-		return url;
+		return url.toLowerCase();
 	}
 	if (url.indexOf(":") > 0) url = url.substr(0, url.indexOf(":"));
-	return url;
+	return url.toLowerCase();
 }
-function domainHandler(domain,action) {
+function parseList(json) {
 	try {
-		// Initialize local storage
-		if (typeof(localStorage['whiteList'])=='undefined') localStorage['whiteList'] = JSON.stringify([]);
-		if (typeof(localStorage['blackList'])=='undefined') localStorage['blackList'] = JSON.stringify([]);
-		var tempWhitelist = JSON.parse(localStorage['whiteList']);
-		var tempBlacklist = JSON.parse(localStorage['blackList']);
-		
-		// Remove domain from whitelist and blacklist
-		var pos = tempWhitelist.indexOf(domain);
-		if (pos>-1) tempWhitelist.splice(pos,1);
-		pos = tempBlacklist.indexOf(domain);
-		if (pos>-1) tempBlacklist.splice(pos,1);
-		
-		switch(action) {
-			case 0:	// Whitelist
-				tempWhitelist.push(domain);
-				console.log('[BG] Added to whitelist:', domain);
-				break;
-			case 1:	// Blacklist
-				tempBlacklist.push(domain);
-				console.log('[BG] Added to blacklist:', domain);
-				break;
-			case 2:	// Remove
-				console.log('[BG] Removed domain:', domain);
-				break;
-		}
-		
-		// Save to both localStorage and chrome.storage.local
-		var blackListJson = JSON.stringify(tempBlacklist);
-		var whiteListJson = JSON.stringify(tempWhitelist);
-		
-		localStorage['blackList'] = blackListJson;
-		localStorage['whiteList'] = whiteListJson;
-		
-		// Also save to chrome.storage.local to trigger sync
-		chrome.storage.local.set({
-			'blackList': blackListJson,
-			'whiteList': whiteListJson
-		});
-		
-		// Update global arrays immediately
+		var list = JSON.parse(json || '[]');
+		if (!Array.isArray(list)) return [];
+		return list.filter(function(d) { return typeof d === 'string' && d.trim() !== ''; })
+			.map(function(d) { return d.trim().toLowerCase(); });
+	} catch(e) {
+		return [];
+	}
+}
+function domainHandler(domain, action) {
+	try {
+		domain = String(domain || '').trim().toLowerCase();
+		if (!domain) return false;
+		var tempWhitelist = parseList(localStorage['whiteList']);
+		var tempBlacklist = parseList(localStorage['blackList']);
+
+		// Remove domain from both lists first
+		tempWhitelist = tempWhitelist.filter(function(d) { return d !== domain; });
+		tempBlacklist = tempBlacklist.filter(function(d) { return d !== domain; });
+
+		if (action == 0) tempWhitelist.push(domain);      // Whitelist
+		else if (action == 1) tempBlacklist.push(domain); // Blacklist
+		// action 2: remove only
+
+		localStorage['blackList'] = JSON.stringify(tempBlacklist);
+		localStorage['whiteList'] = JSON.stringify(tempWhitelist);
 		blackList = tempBlacklist.sort();
 		whiteList = tempWhitelist.sort();
-		
-		console.log('[BG] Lists updated. Whitelist:', whiteList.length, 'Blacklist:', blackList.length);
-		
 		return true;
 	} catch(e) {
-		console.error('[BG] Error in domainHandler:', e);
+		console.error('[DP] Error in domainHandler:', e);
 		return false;
 	}
 }
@@ -267,133 +248,91 @@ function setDefaultOptions() {
 	defaultOptionValue("s_text", "000000");
 	defaultOptionValue("customcss", "");
 	// fix hotkey shortcut if in old format (if using + as separator instead of space)
-	if (localStorage["hotkey"].indexOf('+') != -1) {
+	if (localStorage["hotkey"] && localStorage["hotkey"].indexOf('+') != -1) {
 		localStorage["hotkey"] = localStorage["hotkey"].replace(/\+$/, "APLUSA").replace(/\+/g, " ").replace(/APLUSA/, "+");
 	}
-	// delete old option if exists
-	if (optionExists("globalEnable"))
-		delete localStorage["globalEnable"];
-	// delete old option if exists
-	if (optionExists("style"))
-		delete localStorage["style"];
+	// delete old options if they exist
+	if (optionExists("globalEnable")) delete localStorage["globalEnable"];
+	if (optionExists("style")) delete localStorage["style"];
 	// set SFW Level to SFW (for new change in v0.46.3)
-	if (localStorage["sfwmode"] == "true")
-		localStorage["sfwmode"] = "SFW";
+	if (localStorage["sfwmode"] == "true") localStorage["sfwmode"] = "SFW";
 	if (!optionExists("blackList")) localStorage['blackList'] = JSON.stringify([]);
 	if (!optionExists("whiteList")) localStorage['whiteList'] = JSON.stringify([]);
 }
+function initLists() {
+	blackList = parseList(localStorage['blackList']).sort();
+	whiteList = parseList(localStorage['whiteList']).sort();
+}
 
-// Called by clicking on the context menu item
+// ----- Context menus
+// Called by clicking on the "open safely" context menu item
 function newCloak(info, tab) {
-	// Enable cloaking (in case its been disabled) and open the link in a new tab
+	// Enable cloaking (in case it has been disabled) and open the link in a new tab
 	localStorage["enable"] = "true";
-	// If it's an image, load the "src" attribute
-	if (info.mediaType) chrome.tabs.create({'url': info.srcUrl}, function(tab){ cloakedTabs.push(tab.windowId+"|"+tab.id);recursiveCloak('true', localStorage["global"], tab.id); });
-	// Else, it's a normal link, so load the linkUrl.
-	else chrome.tabs.create({'url': info.linkUrl}, function(tab){ cloakedTabs.push(tab.windowId+"|"+tab.id);recursiveCloak('true', localStorage["global"], tab.id); });
+	var url = info.mediaType ? info.srcUrl : info.linkUrl;
+	chrome.tabs.create({'url': url, 'openerTabId': tab ? tab.id : undefined}, function(newTab) {
+		if (chrome.runtime.lastError || !newTab) return;
+		markCloaked(newTab.id);
+	});
 }
-// Initialize context menus safely
-var menusInitialized = false;
 function initializeContextMenus() {
-	if (menusInitialized) return;
-	
-	try {
-		// Remove all existing menus first to avoid duplicates
-		chrome.contextMenus.removeAll(function() {
-			if (chrome.runtime.lastError) {
-				console.error('Error removing menus:', chrome.runtime.lastError);
-				return;
-			}
-			
-			// Create context menus without onclick handlers (MV3 style)
-			chrome.contextMenus.create({"id": "whitelistdomain", "title": chrome.i18n.getMessage("whitelistdomain"), "contexts": ['action']}, function() {
-				if (chrome.runtime.lastError) return; // Silently ignore if already exists
-			});
-			chrome.contextMenus.create({"id": "blacklistdomain", "title": chrome.i18n.getMessage("blacklistdomain"), "contexts": ['action']}, function() {
-				if (chrome.runtime.lastError) return;
-			});
-			chrome.contextMenus.create({"id": "removelist", "title": chrome.i18n.getMessage("removelist"), "contexts": ['action']}, function() {
-				if (chrome.runtime.lastError) return;
-			});
-			
-			// Add context menu item that shows only if you right-click on links/images
-			if (localStorage["showContext"] == 'true' && !contextLoaded) {
-				chrome.contextMenus.create({"id": "opensafely", "title": chrome.i18n.getMessage("opensafely"), "contexts": ['link', 'image']}, function() {
-					if (chrome.runtime.lastError) return;
-				});
-				contextLoaded = true;
-			}
-			
-			menusInitialized = true;
-		});
-	} catch(e) {
-		console.error('Error initializing context menus:', e);
-	}
+	chrome.contextMenus.removeAll(function() {
+		if (chrome.runtime.lastError) return;
+		var ignore = function() { void chrome.runtime.lastError; };
+		chrome.contextMenus.create({"id": "whitelistdomain", "title": chrome.i18n.getMessage("whitelistdomain"), "contexts": ['action']}, ignore);
+		chrome.contextMenus.create({"id": "blacklistdomain", "title": chrome.i18n.getMessage("blacklistdomain"), "contexts": ['action']}, ignore);
+		chrome.contextMenus.create({"id": "removelist", "title": chrome.i18n.getMessage("removelist"), "contexts": ['action']}, ignore);
+		// Context menu item that shows only if you right-click on links/images
+		if (isTrue(localStorage["showContext"])) {
+			chrome.contextMenus.create({"id": "opensafely", "title": chrome.i18n.getMessage("opensafely"), "contexts": ['link', 'image']}, ignore);
+		}
+	});
 }
-
-// Handle context menu clicks
 function handleContextMenuClick(info, tab) {
-	if (tab.url.substring(0, 4) != 'http') return;
-	
+	if (info.menuItemId == 'opensafely') {
+		newCloak(info, tab);
+		return;
+	}
+	if (!tab || !isCloakableUrl(tab.url)) return;
+	var domain = extractDomainFromURL(tab.url);
 	switch(info.menuItemId) {
 		case 'whitelistdomain':
-			domainHandler(extractDomainFromURL(tab.url), 0);
-			if (localStorage["enable"] == "true") magician('false', tab.id);
+			domainHandler(domain, 0);
+			setTabCloak(tab, false);
 			break;
 		case 'blacklistdomain':
-			domainHandler(extractDomainFromURL(tab.url), 1);
-			if (localStorage["enable"] == "true") magician('true', tab.id);
+			domainHandler(domain, 1);
+			delete manualUncloak[tab.id];
+			setTabCloak(tab, true);
 			break;
 		case 'removelist':
-			domainHandler(extractDomainFromURL(tab.url), 2);
-			if (localStorage["enable"] == "true")  {
-				var flag = 'false';
-				if (localStorage['newPages'] == 'Cloak' || localStorage['global'] == 'true') flag = 'true';
-				magician(flag, tab.id);
-			}
-			break;
-		case 'opensafely':
-			newCloak(info, tab);
+			domainHandler(domain, 2);
+			delete manualUncloak[tab.id];
+			setTabCloak(tab, isTrue(localStorage["enable"]) && (localStorage['newPages'] == 'Cloak' || isTrue(localStorage['global'])));
 			break;
 	}
 }
 // ----- Main Functions
-function checkChrome(url) {
-	if (url.substring(0, 6) == 'chrome') return true;
-	return false;
+function isCloakableUrl(url) {
+	return typeof url === 'string' && /^https?:\/\//i.test(url);
 }
 function hotkeyChange() {
-	console.log('[BG] Hotkey change triggered. Settings:', {
-		enableToggle: localStorage["enableToggle"],
-		hotkey: localStorage["hotkey"],
-		paranoidhotkey: localStorage["paranoidhotkey"]
-	});
-	
-	chrome.windows.getAll({"populate":true}, function(windows) {
-		windows.map(function(window) {
-			window.tabs.map(function(tab) {
-				if (!checkChrome(tab.url)) {
-					chrome.scripting.executeScript({
-						target: {tabId: tab.id}, 
-						func: function(enableToggle, hotkey, paranoidhotkey) {
-							console.log('[DP] Hotkey settings received:', {enableToggle, hotkey, paranoidhotkey});
-							if (typeof hotkeySet === 'function') {
-								hotkeySet(enableToggle, hotkey, paranoidhotkey);
-								console.log('[DP] Hotkeys updated');
-							} else {
-								console.log('[DP] hotkeySet function not available');
-							}
-						}, 
-						args: [localStorage["enableToggle"], localStorage["hotkey"], localStorage["paranoidhotkey"]]
-					}).catch((e) => {
-						console.log('[BG] Could not inject hotkeys into tab', tab.id, ':', e.message);
-					});
-				}
-			});
+	chrome.tabs.query({}, function(tabs) {
+		tabs.forEach(function(tab) {
+			if (!isCloakableUrl(tab.url)) return;
+			chrome.scripting.executeScript({
+				target: {tabId: tab.id, allFrames: true},
+				func: function(enableToggle, hotkey, paranoidhotkey) {
+					if (typeof hotkeySet === 'function') hotkeySet(enableToggle, hotkey, paranoidhotkey);
+				},
+				args: [localStorage["enableToggle"], localStorage["hotkey"], localStorage["paranoidhotkey"]]
+			}).catch(function() { /* tab not scriptable (e.g. Chrome Web Store) */ });
 		});
 	});
 }
 function optionsSaveTrigger(prevglob, newglob) {
+	prevglob = normalizeValue(prevglob);
+	newglob = normalizeValue(newglob);
 	var enable = localStorage["enable"];
 	var global = newglob;
 	if (prevglob == 'true' && newglob == 'false') {
@@ -401,295 +340,212 @@ function optionsSaveTrigger(prevglob, newglob) {
 		enable = 'false';
 	}
 	if (global == 'false') {
-		for (var i=cloakedTabs.length-1; i>=0; --i) {
-			magician(enable, parseInt(cloakedTabs[i].split("|")[1]));
-		}
-		if (enable == 'false') cloakedTabs = [];
-	} else recursiveCloak(enable, global);
-}
-function recursiveCloak(enable, global, tabId) {
-	if (global == 'true') {
-		chrome.windows.getAll({"populate":true}, function(windows) {
-			windows.map(function(window) {
-				window.tabs.map(function(tab) {
-					if (!checkChrome(tab.url)) {
-						var enabletemp = enable;
-						var dpdomaincheck = domainCheck(extractDomainFromURL(tab.url));
-						// Ensure whitelisted or blacklisted tabs stay as they are
-						if (enabletemp == 'true' && dpdomaincheck == '0') enabletemp = 'false';
-						else if (enabletemp == 'false' && dpdomaincheck == '1') enabletemp = 'true';
-						magician(enabletemp, tab.id);
-						var dpTabId = tab.windowId+"|"+tab.id;
-						var dpcloakindex = cloakedTabs.indexOf(dpTabId);
-						var dpuncloakindex = uncloakedTabs.indexOf(dpTabId);
-						if (enabletemp == 'false') {
-							if (dpuncloakindex == -1) uncloakedTabs.push(dpTabId);
-							if (dpcloakindex != -1) cloakedTabs.splice(dpcloakindex, 1);
-						} else {
-							if (dpcloakindex == -1) cloakedTabs.push(dpTabId);
-							if (dpuncloakindex != -1) uncloakedTabs.splice(dpuncloakindex, 1);
-						}
-					}
-				});
+		// Re-apply (or remove) the cloak on tabs that are currently cloaked so new settings take effect
+		var tabs = cloakedTabs.slice();
+		tabs.forEach(function(tabId) {
+			chrome.tabs.get(tabId, function(tab) {
+				if (chrome.runtime.lastError || !tab) { forgetTab(tabId); return; }
+				setTabCloak(tab, enable == 'true' || domainCheck(extractDomainFromURL(tab.url)) == '1');
 			});
 		});
-	} else {
-		if (tabId) magician(enable, tabId);
+	} else recursiveCloak(enable, global);
+}
+// Apply the cloak state to every tab (global mode)
+function recursiveCloak(enable, global, tabId) {
+	if (global == 'true') {
+		chrome.tabs.query({}, function(tabs) {
+			tabs.forEach(function(tab) {
+				if (!isCloakableUrl(tab.url)) return;
+				var cloak = enable == 'true';
+				var dpdomaincheck = domainCheck(extractDomainFromURL(tab.url));
+				// Ensure whitelisted or blacklisted tabs stay as they are
+				if (dpdomaincheck == '0') cloak = false;
+				else if (dpdomaincheck == '1') cloak = true;
+				delete manualUncloak[tab.id];
+				setTabCloak(tab, cloak);
+			});
+		});
+	} else if (tabId) {
+		magician(enable, tabId);
 	}
+}
+// Cloak or uncloak a single tab and keep the tracking in sync
+function setTabCloak(tab, cloak) {
+	magician(cloak ? 'true' : 'false', tab.id);
+	if (cloak) markCloaked(tab.id);
+	else markUncloaked(tab.id);
 }
 function magician(enable, tabId) {
-	// Send simple message to content script to apply or remove cloak
-	// The content script will handle getting all settings and applying them correctly
-	console.log('[BG] magician called:', enable, 'tab:', tabId);
-	if (enable == 'true') {
-		chrome.tabs.sendMessage(tabId, {action: 'applyCloak'}).catch((err) => {
-			console.log('[BG] Could not send applyCloak to tab', tabId, ':', err.message);
-		});
-	} else {
-		chrome.tabs.sendMessage(tabId, {action: 'removeCloak'}).catch((err) => {
-			console.log('[BG] Could not send removeCloak to tab', tabId, ':', err.message);
-		});
-	}
-	if (localStorage["showIcon"] == 'true') {
-		try {
-			if (enable == 'true') chrome.action.setIcon({path: "/img/addressicon/"+dpicon+".png", tabId: tabId});
-			else chrome.action.setIcon({path: "/img/addressicon/"+dpicon+"-disabled.png", tabId: tabId});
-			chrome.action.setTitle({title: dptitle, tabId: tabId});
-		} catch(e) {
-			// Silently ignore icon errors
-		}
-		// Note: chrome.action.show/hide don't exist in MV3
-	}
+	// The content script fetches the settings itself and applies or removes the cloak
+	chrome.tabs.sendMessage(tabId, {action: enable == 'true' ? 'applyCloak' : 'removeCloak'}).catch(function() {
+		// No content script in that tab (yet): it will ask for its state when it loads
+	});
+	updateIcon(tabId, enable == 'true');
 }
+function updateIcon(tabId, cloaked) {
+	if (!isTrue(localStorage["showIcon"])) return;
+	var path = "/img/addressicon/" + dpicon + (cloaked ? "" : "-disabled") + ".png";
+	chrome.action.setIcon({path: path, tabId: tabId}).catch(function() {});
+	chrome.action.setTitle({title: dptitle, tabId: tabId}).catch(function() {});
+}
+// Toolbar icon / hotkey toggle
 function dpHandle(tab) {
-	if (checkChrome(tab.url)) return;
-	if (localStorage["global"] == "true" && domainCheck(extractDomainFromURL(tab.url)) != 1) {
-		if (localStorage["enable"] == "true") {
-			recursiveCloak('false', 'true');
+	if (!tab || !isCloakableUrl(tab.url)) return;
+	var domain = extractDomainFromURL(tab.url);
+	if (isTrue(localStorage["global"]) && domainCheck(domain) != '1') {
+		if (isTrue(localStorage["enable"])) {
 			localStorage["enable"] = "false";
+			recursiveCloak('false', 'true');
 		} else {
-			recursiveCloak('true', 'true');
 			localStorage["enable"] = "true";
+			recursiveCloak('true', 'true');
 		}
 	} else {
-		var dpTabId = tab.windowId+"|"+tab.id;
-		var dpcloakindex = cloakedTabs.indexOf(dpTabId);
-		var dpuncloakindex = uncloakedTabs.indexOf(dpTabId);
 		localStorage["enable"] = "true";
-		if (dpcloakindex != -1) {
-			magician('false', tab.id);
-			if (dpuncloakindex == -1) uncloakedTabs.push(dpTabId);
-			cloakedTabs.splice(dpcloakindex, 1);
+		if (isCloakedTab(tab.id)) {
+			// Remember the manual choice so the tab is not re-cloaked on reload
+			// (e.g. a blacklisted domain or "cloak new pages") while it stays on this domain
+			manualUncloak[tab.id] = domain;
+			setTabCloak(tab, false);
 		} else {
-			magician('true', tab.id);
-			cloakedTabs.push(dpTabId);
-			if (dpuncloakindex != -1) uncloakedTabs.splice(dpuncloakindex, 1);
+			delete manualUncloak[tab.id];
+			setTabCloak(tab, true);
 		}
 	}
 }
 function setDPIcon() {
-	dpicon = localStorage["iconType"];
-	dptitle = localStorage["iconTitle"];
-	chrome.windows.getAll({"populate":true}, function(windows) {
-		windows.map(function(window) {
-			window.tabs.map(function(tab) {
-			try {
-				if (cloakedTabs.indexOf(tab.windowId+"|"+tab.id) != -1) chrome.action.setIcon({path: "/img/addressicon/"+dpicon+".png", tabId: tab.id});
-				else chrome.action.setIcon({path: "/img/addressicon/"+dpicon+"-disabled.png", tabId: tab.id});
-				chrome.action.setTitle({title: dptitle, tabId: tab.id});
-			} catch(e) {
-				// Silently ignore icon errors
-			}
-			// Note: chrome.action.show/hide don't exist in MV3
-			});
-		});
+	dpicon = localStorage["iconType"] || 'coffee';
+	dptitle = localStorage["iconTitle"] || 'Decreased Productivity';
+	chrome.tabs.query({}, function(tabs) {
+		tabs.forEach(function(tab) { updateIcon(tab.id, isCloakedTab(tab.id)); });
 	});
 }
-function initLists() {
-	// Initialize lists if they don't exist or are undefined
-	if (!localStorage['blackList'] || localStorage['blackList'] === 'undefined') {
-		localStorage['blackList'] = JSON.stringify([]);
-	}
-	if (!localStorage['whiteList'] || localStorage['whiteList'] === 'undefined') {
-		localStorage['whiteList'] = JSON.stringify([]);
-	}
-	
-		try {
-			blackList = JSON.parse(localStorage['blackList']).sort();
-			whiteList = JSON.parse(localStorage['whiteList']).sort();
-			console.log('[BG] Lists initialized. Whitelist:', whiteList.length, 'domains:', whiteList);
-			console.log('[BG] Lists initialized. Blacklist:', blackList.length, 'domains:', blackList);
-		} catch(e) {
-			console.error('[BG] Error parsing lists, resetting:', e);
-			localStorage['blackList'] = JSON.stringify([]);
-			localStorage['whiteList'] = JSON.stringify([]);
-			blackList = [];
-			whiteList = [];
-		}
+function getSettings() {
+	var fontface;
+	if (localStorage["font"] == '-Custom-') fontface = localStorage["customfont"] || 'Arial';
+	else fontface = localStorage["font"];
+	return {sfwmode: localStorage["sfwmode"], font: fontface, fontsize: localStorage["fontsize"], underline: localStorage["showUnderline"], background: localStorage["s_bg"], text: localStorage["s_text"], table: localStorage["s_table"], link: localStorage["s_link"], bold: localStorage["removeBold"], opacity1: localStorage["opacity1"], opacity2: localStorage["opacity2"], collapseimage: localStorage["collapseimage"], maxheight: localStorage["maxheight"], maxwidth: localStorage["maxwidth"], customcss: localStorage["customcss"], favicon: localStorage["disableFavicons"], hidePageTitles: localStorage["hidePageTitles"], pageTitleText: localStorage["pageTitleText"], enableToggle: localStorage["enableToggle"], hotkey: localStorage["hotkey"], paranoidhotkey: localStorage["paranoidhotkey"]};
 }
-// ----- Request library to support content script communication
-chrome.tabs.onUpdated.addListener(function(tabid, changeinfo, tab) {
-	if (changeinfo.status == "loading") {
-		var dpTabId = tab.windowId+"|"+tabid;
-		var dpcloakindex = cloakedTabs.indexOf(dpTabId);
-		var dpuncloakindex = uncloakedTabs.indexOf(dpTabId);
-		var enable = enabled(tab, dpcloakindex);
-		
-		// Update icon based on current state
-		if (localStorage["showIcon"] == "true") {
-			try {
-				if (enable == "true") chrome.action.setIcon({path: "/img/addressicon/"+dpicon+".png", tabId: tabid});
-				else chrome.action.setIcon({path: "/img/addressicon/"+dpicon+"-disabled.png", tabId: tabid});
-				chrome.action.setTitle({title: dptitle, tabId: tabid});
-			} catch(e) {
-				// Silently ignore icon errors (incognito restrictions)
-			}
+// Evaluate a tab, update tracking and return 'true' / 'false'
+function evaluateTab(tab) {
+	var enable = enabled(tab);
+	if (enable == 'true') markCloaked(tab.id);
+	else markUncloaked(tab.id);
+	updateIcon(tab.id, enable == 'true');
+	return enable;
+}
+
+// ----- Event listeners (registered synchronously at top level, as MV3 requires)
+chrome.storage.onChanged.addListener(function(changes, areaName) {
+	if (areaName !== 'local') return;
+	ready.then(function() {
+		for (var key in changes) {
+			if (changes[key].newValue === undefined) delete localStorageCache[key];
+			else localStorageCache[key] = changes[key].newValue;
 		}
-		
-		// Skip chrome:// pages
-		if (checkChrome(tab.url)) return;
-		
-		// Apply cloak if needed and update tab tracking arrays
-		if (enable == "true") {
-			magician('true', tabid);
-			if (localStorage["global"] == "false" && localStorage["enable"] == "false") localStorage["enable"] = "true";
-			// Ensure tab is tracked as cloaked
-			if (dpcloakindex == -1) cloakedTabs.push(dpTabId);
-			if (dpuncloakindex != -1) uncloakedTabs.splice(dpuncloakindex, 1);
-		} else {
-			// Handle stickiness for new tabs
-			if (localStorage["enableStickiness"] == "true") {
-				if (tab.openerTabId) {
-					if (cloakedTabs.indexOf(tab.windowId+"|"+tab.openerTabId) != -1 && dpuncloakindex == -1) {
-						if (domainCheck(extractDomainFromURL(tab.url)) != '0') {
-							magician('true', tabid);
-							cloakedTabs.push(dpTabId);
-							return;
-						}
-					}
-					if (dpuncloakindex == -1) uncloakedTabs.push(dpTabId);
-					if (dpcloakindex != -1) cloakedTabs.splice(dpcloakindex, 1);
-				} else {
-					chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
-						if (tabs[0].windowId == tab.windowId && cloakedTabs.indexOf(tabs[0].windowId+"|"+tabs[0].id) != -1 && dpuncloakindex == -1) {
-							if (domainCheck(extractDomainFromURL(tab.url)) != '0') {
-								magician('true', tabid);
-								cloakedTabs.push(dpTabId);
-								return;
-							}
-						}
-						if (dpuncloakindex == -1) uncloakedTabs.push(dpTabId);
-						if (dpcloakindex != -1) cloakedTabs.splice(dpcloakindex, 1);
-					});
-				}
-			} else {
-				// No stickiness - just track as uncloaked
-				if (dpuncloakindex == -1) uncloakedTabs.push(dpTabId);
-				if (dpcloakindex != -1) cloakedTabs.splice(dpcloakindex, 1);
-			}
-		}
-	}
-});	
-chrome.tabs.onRemoved.addListener(function(tabid, windowInfo) {
-	var dpTabId = windowInfo.windowId+"|"+tabid;
-	var dpcloakindex = cloakedTabs.indexOf(dpTabId);
-	var dpuncloakindex = uncloakedTabs.indexOf(dpTabId);
-	if (dpcloakindex != -1) cloakedTabs.splice(dpcloakindex, 1);
-	if (dpuncloakindex != -1) uncloakedTabs.splice(dpuncloakindex, 1);
+		if ('whiteList' in changes || 'blackList' in changes) initLists();
+		if ('iconType' in changes || 'iconTitle' in changes) setDPIcon();
+		if ('showContext' in changes) initializeContextMenus();
+	});
 });
 
-// Add listeners for tab activation and window focus to update icons
+chrome.tabs.onUpdated.addListener(function(tabId, changeinfo, tab) {
+	if (changeinfo.status != "loading") return;
+	ready.then(function() {
+		if (!isCloakableUrl(tab.url)) {
+			updateIcon(tabId, false);
+			return;
+		}
+		var domain = extractDomainFromURL(tab.url);
+		// A manual "uncloak" only sticks while the tab stays on the same domain
+		if (manualUncloak[tabId] && manualUncloak[tabId] !== domain) {
+			delete manualUncloak[tabId];
+			persistTabState();
+		}
+		var enable = enabled(tab);
+		if (enable == 'true') {
+			markCloaked(tabId);
+			updateIcon(tabId, true);
+			return;
+		}
+		// Stickiness: tabs opened from a cloaked tab inherit the cloak
+		if (isTrue(localStorage["enableStickiness"]) && isTrue(localStorage["enable"])
+			&& uncloakedTabs.indexOf(tabId) == -1 && !manualUncloak[tabId]
+			&& domainCheck(domain) != '0'
+			&& tab.openerTabId !== undefined && isCloakedTab(tab.openerTabId)) {
+			markCloaked(tabId);
+			magician('true', tabId);
+			return;
+		}
+		markUncloaked(tabId);
+		updateIcon(tabId, false);
+	});
+});
+chrome.tabs.onRemoved.addListener(function(tabId) {
+	ready.then(function() { forgetTab(tabId); });
+});
+chrome.tabs.onReplaced.addListener(function(addedTabId, removedTabId) {
+	ready.then(function() {
+		if (isCloakedTab(removedTabId)) markCloaked(addedTabId);
+		forgetTab(removedTabId);
+	});
+});
 chrome.tabs.onActivated.addListener(function(activeInfo) {
-	if (localStorage["showIcon"] == "true") {
-		try {
-			var dpTabId = activeInfo.windowId + "|" + activeInfo.tabId;
-			var dpcloakindex = cloakedTabs.indexOf(dpTabId);
-			if (dpcloakindex != -1) {
-				chrome.action.setIcon({path: "/img/addressicon/"+dpicon+".png", tabId: activeInfo.tabId});
-			} else {
-				chrome.action.setIcon({path: "/img/addressicon/"+dpicon+"-disabled.png", tabId: activeInfo.tabId});
-			}
-			chrome.action.setTitle({title: dptitle, tabId: activeInfo.tabId});
-		} catch(e) {
-			// Silently ignore icon errors (incognito restrictions)
-		}
-	}
+	ready.then(function() { updateIcon(activeInfo.tabId, isCloakedTab(activeInfo.tabId)); });
 });
 
-chrome.windows.onFocusChanged.addListener(function(windowId) {
-	if (windowId == chrome.windows.WINDOW_ID_NONE) return;
-	if (localStorage["showIcon"] == "true") {
-		chrome.tabs.query({active: true, windowId: windowId}, function(tabs) {
-			if (tabs.length > 0) {
-				try {
-					var dpTabId = windowId + "|" + tabs[0].id;
-					var dpcloakindex = cloakedTabs.indexOf(dpTabId);
-					if (dpcloakindex != -1) {
-						chrome.action.setIcon({path: "/img/addressicon/"+dpicon+".png", tabId: tabs[0].id});
-					} else {
-						chrome.action.setIcon({path: "/img/addressicon/"+dpicon+"-disabled.png", tabId: tabs[0].id});
-					}
-					chrome.action.setTitle({title: dptitle, tabId: tabs[0].id});
-				} catch(e) {
-					// Silently ignore icon errors (incognito restrictions)
-				}
-			}
-		});
-	}
-});
 var requestDispatchTable = {
+	// Single round trip used by the content script: should this tab be cloaked, and with which settings
+	"get-cloak-state": function(request, sender, sendResponse) {
+		if (!sender.tab) { sendResponse({shouldCloak: false, settings: getSettings()}); return; }
+		var enable = evaluateTab(sender.tab);
+		sendResponse({shouldCloak: enable === 'true', settings: getSettings()});
+	},
+	// Legacy messages, kept for compatibility
 	"get-enabled": function(request, sender, sendResponse) {
-		var dpTabId = sender.tab.windowId+"|"+sender.tab.id;
-		var dpcloakindex = cloakedTabs.indexOf(dpTabId);
-		var enable = enabled(sender.tab, dpcloakindex);
-		if (enable == 'true' && dpcloakindex == -1) cloakedTabs.push(dpTabId);
-		sendResponse({enable: enable, background: localStorage["s_bg"], favicon: localStorage["disableFavicons"], hidePageTitles: localStorage["hidePageTitles"], pageTitleText: localStorage["pageTitleText"], enableToggle: localStorage["enableToggle"], hotkey: localStorage["hotkey"], paranoidhotkey: localStorage["paranoidhotkey"]});
+		var enable = sender.tab ? evaluateTab(sender.tab) : 'false';
+		var s = getSettings();
+		sendResponse({enable: enable, background: s.background, favicon: s.favicon, hidePageTitles: s.hidePageTitles, pageTitleText: s.pageTitleText, enableToggle: s.enableToggle, hotkey: s.hotkey, paranoidhotkey: s.paranoidhotkey});
+	},
+	"should-cloak-tab": function(request, sender, sendResponse) {
+		sendResponse({shouldCloak: !!sender.tab && evaluateTab(sender.tab) === 'true'});
+	},
+	"get-settings": function(request, sender, sendResponse) {
+		var s = getSettings();
+		s.enable = sender.tab ? enabled(sender.tab) : 'false';
+		sendResponse(s);
+	},
+	"get-domain-status": function(request, sender, sendResponse) {
+		var url = (sender && sender.tab && sender.tab.url) ? sender.tab.url : (request && request.url) ? request.url : '';
+		var domain = extractDomainFromURL(url);
+		sendResponse({domain: domain, result: domainCheck(domain)});
 	},
 	"toggle": function(request, sender, sendResponse) {
 		if (localStorage["savedsfwmode"] != "") {
+			// Leaving paranoid mode: restore the previous level and keep the tab cloaked
 			localStorage["sfwmode"] = localStorage["savedsfwmode"];
 			localStorage["savedsfwmode"] = "";
-			if (localStorage["global"] == "true") recursiveCloak('true', 'true');
-			else {
-				magician('true', sender.tab.id);
-				var dpTabId = sender.tab.windowId+"|"+sender.tab.id;
-				var dpuncloakindex = uncloakedTabs.indexOf(dpTabId);
-				if (dpuncloakindex != -1) uncloakedTabs.splice(dpuncloakindex, 1);
-				if (cloakedTabs.indexOf(dpTabId) == -1) cloakedTabs.push(dpTabId);
-			}
 			localStorage["enable"] = "true";
+			if (isTrue(localStorage["global"])) recursiveCloak('true', 'true');
+			else { delete manualUncloak[sender.tab.id]; setTabCloak(sender.tab, true); }
 		} else {
 			dpHandle(sender.tab);
 		}
+		sendResponse({success: true});
 	},
 	"toggleparanoid": function(request, sender, sendResponse) {
 		if (localStorage["savedsfwmode"] == "") {
 			localStorage["savedsfwmode"] = localStorage["sfwmode"];
 			localStorage["sfwmode"] = "Paranoid";
-			if (localStorage["global"] == "true") recursiveCloak('true', 'true');
-			else {
-				magician('true', sender.tab.id);
-				var dpTabId = sender.tab.windowId+"|"+sender.tab.id;
-				var dpuncloakindex = uncloakedTabs.indexOf(dpTabId);
-				if (dpuncloakindex != -1) uncloakedTabs.splice(dpuncloakindex, 1);
-				if (cloakedTabs.indexOf(dpTabId) == -1) cloakedTabs.push(dpTabId);
-			}
 			localStorage["enable"] = "true";
+			if (isTrue(localStorage["global"])) recursiveCloak('true', 'true');
+			else { delete manualUncloak[sender.tab.id]; setTabCloak(sender.tab, true); }
 		} else {
 			localStorage["sfwmode"] = localStorage["savedsfwmode"];
 			localStorage["savedsfwmode"] = "";
 			dpHandle(sender.tab);
 		}
-	},
-	"get-settings": function(request, sender, sendResponse) {
-		var enable, fontface;
-		if (localStorage["font"] == '-Custom-') {
-			if (localStorage["customfont"]) fontface = localStorage["customfont"];
-			else fontface = 'Arial';
-		} else fontface = localStorage["font"];
-		if (localStorage["global"] == "false") enable = 'true';
-		else enable = enabled(sender.tab);
-		sendResponse({enable: enable, sfwmode: localStorage["sfwmode"], font: fontface, fontsize: localStorage["fontsize"], underline: localStorage["showUnderline"], background: localStorage["s_bg"], text: localStorage["s_text"], table: localStorage["s_table"], link: localStorage["s_link"], bold: localStorage["removeBold"], opacity1: localStorage["opacity1"], opacity2: localStorage["opacity2"], collapseimage: localStorage["collapseimage"], maxheight: localStorage["maxheight"], maxwidth: localStorage["maxwidth"], customcss: localStorage["customcss"], favicon: localStorage["disableFavicons"]});
+		sendResponse({success: true});
 	},
 	"setDPIcon": function(request, sender, sendResponse) {
 		setDPIcon();
@@ -704,8 +560,7 @@ var requestDispatchTable = {
 		sendResponse({success: true});
 	},
 	"domainHandler": function(request, sender, sendResponse) {
-		var success = domainHandler(request.domain, request.type);
-		sendResponse({success: success});
+		sendResponse({success: domainHandler(request.domain, request.type)});
 	},
 	"initLists": function(request, sender, sendResponse) {
 		initLists();
@@ -713,110 +568,40 @@ var requestDispatchTable = {
 	},
 	"ping": function(request, sender, sendResponse) {
 		sendResponse({pong: true});
-	},
-	"get-domain-status": function(request, sender, sendResponse) {
-		// Returns domain and domainCheck result for the sender tab URL
-		(async () => {
-			try {
-				if (!storageInitialized) await initializeStorage();
-				if (!blackList || !whiteList) initLists();
-				var url = (sender && sender.tab && sender.tab.url) ? sender.tab.url : (request && request.url) ? request.url : '';
-				var domain = extractDomainFromURL(url);
-				var result = domainCheck(domain);
-				sendResponse({domain: domain, result: result});
-			} catch(e) {
-				sendResponse({domain: '', result: '-1'});
-			}
-		})();
-		return true;
-	},
-	"should-cloak-tab": function(request, sender, sendResponse) {
-		// Ensure storage and lists are initialized before answering
-		const ensureReady = async () => {
-			if (!storageInitialized) {
-				await initializeStorage();
-			}
-			if (!blackList || !whiteList) {
-				initLists();
-			}
-		};
-		
-		(async () => {
-			try {
-				if (!sender.tab) {
-					sendResponse({shouldCloak: false});
-					return;
-				}
-				await ensureReady();
-				var dpTabId = sender.tab.windowId + "|" + sender.tab.id;
-				var dpcloakindex = cloakedTabs.indexOf(dpTabId);
-				var domain = extractDomainFromURL(sender.tab.url);
-				var domainCheckResult = domainCheck(domain);
-				var enable = enabled(sender.tab, dpcloakindex);
-				console.log('[BG] Should cloak tab?', sender.tab.url, '→', enable);
-				console.log('[BG] Domain:', domain, 'DomainCheck:', domainCheckResult, 'CloakIndex:', dpcloakindex);
-				console.log('[BG] BlackList:', blackList, 'WhiteList:', whiteList);
-				sendResponse({shouldCloak: enable === 'true'});
-			} catch(e) {
-				console.log('[BG] should-cloak-tab error:', e && e.message ? e.message : e);
-				sendResponse({shouldCloak: false});
-			}
-		})();
 	}
-}
-// ===== REGISTER MESSAGE LISTENER FIRST (CRITICAL) =====
+};
 chrome.runtime.onMessage.addListener(function(request, sender, sendResponse) {
-	// Handle both old reqtype format and new action format
-	var action = request.reqtype || request.action;
-	if (action in requestDispatchTable) {
-		requestDispatchTable[action](request, sender, sendResponse);
-	} else {
-		sendResponse({});
-	}
-	// Return true to indicate we will send a response asynchronously
-	return true;
-});
-
-// Register context menu click handler
-chrome.contextMenus.onClicked.addListener(handleContextMenuClick);
-
-// ----- If action icon is clicked, either enable or disable the cloak
-chrome.action.onClicked.addListener(function(tab) {
-	dpHandle(tab);
-});
-
-// ===== INITIALIZE EXTENSION (AFTER LISTENERS) =====
-var extensionInitialized = false;
-async function initializeExtension() {
-	if (extensionInitialized) return;
-	extensionInitialized = true;
-	
-	try {
-		// Initialize storage first (CRITICAL for MV3 service workers)
-		await initializeStorage();
-		
-		setDefaultOptions();
-		initLists();
-		setDPIcon();
-		initializeContextMenus();
-		
-		if ((!optionExists("version") || localStorage["version"] != version) && localStorage["showUpdateNotifications"] == 'true') {
-			localStorage["version"] = version;
+	var action = request && (request.reqtype || request.action);
+	if (!(action in requestDispatchTable)) return false;
+	ready.then(function() {
+		try {
+			requestDispatchTable[action](request, sender, sendResponse);
+		} catch(e) {
+			console.error('[DP] Error handling message', action, e);
+			sendResponse({});
 		}
-	} catch(e) {
-		console.error('Error initializing extension:', e);
-		extensionInitialized = false; // Allow retry on error
-	}
-}
-
-// Service worker initialization
-chrome.runtime.onInstalled.addListener(function() {
-	initializeExtension();
+	});
+	return true; // respond asynchronously
 });
 
-// Execute on startup (if not already initialized by onInstalled)
-initializeExtension();
+chrome.contextMenus.onClicked.addListener(function(info, tab) {
+	ready.then(function() { handleContextMenuClick(info, tab); });
+});
 
-chrome.runtime.onUpdateAvailable.addListener(function (details) {
-	// an update is available, but wait until user restarts their browser as to not disrupt their current session and cloaked tabs.
+// If the toolbar icon is clicked, either enable or disable the cloak
+chrome.action.onClicked.addListener(function(tab) {
+	ready.then(function() { dpHandle(tab); });
+});
+
+chrome.runtime.onInstalled.addListener(function() {
+	ready.then(function() {
+		initializeContextMenus();
+		setDPIcon();
+	});
+});
+chrome.runtime.onStartup.addListener(function() {
+	ready.then(function() {
+		initializeContextMenus();
+		setDPIcon();
+	});
 });

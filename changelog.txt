@@ -1,3 +1,12 @@
+v0.47.0.2 - Tuesday, November 10, 2026
+- Fix blacklisted domains not being cloaked (stale per-tab "uncloaked" state overrode the blacklist)
+- Persist tab cloak state across service worker restarts and wait for settings before handling events
+- Restore cloak CSS rules lost in the Manifest V3 migration (links, inputs, background images, borders, site fixes, image opacity)
+- Replace removed DOMSubtreeModified mutation events with MutationObserver
+- Fully restore page title and favicon when uncloaking
+- Options page: load settings before rendering; store checkbox values consistently
+- Minimum Chrome version is now 102
+
 v0.46.56.11 - Friday, October 12, 2018
 - Fix WhatsApp Web blank white screen upon login
 - Add Turkish translation - thanks Serdar!
