@@ -71,8 +71,13 @@ function addCloak(sfw, f, fsize, u, bg, text, table, link, bold, o1, o2, collaps
 	magic += ' html body a, html body a:link, html body a:visited, html body a:hover, html body a:active, html body a * { color: #' + link + ' !important; text-decoration: ' + ((u === true || u === 'true') ? 'underline' : 'none') + ' !important; }';
 
 	if (sfw == 'SFW' || sfw == 'SFW1' || sfw == 'SFW2') {
-		if (o1Num == 0 && collapseimage == 'true') magic += ' iframe, img, canvas, input[type=image], path, polygon, picture { display: none !important; }';
-		else magic += ' iframe, img, canvas, input[type=image], path, polygon, picture { opacity: '+o1+' !important; } iframe:hover, img:hover, input[type=image]:hover, path:hover, polygon:hover, picture:hover { opacity: '+o2+' !important; }';
+		// Whole <svg> elements (not only path/polygon): icons built from circle, rect, text, image... were left visible
+		if (o1Num == 0 && collapseimage == 'true') magic += ' iframe, img, canvas, input[type=image], svg, picture { display: none !important; }';
+		else magic += ' iframe, img, canvas, input[type=image], svg, picture { opacity: '+o1+' !important; } iframe:hover, img:hover, input[type=image]:hover, svg:hover, picture:hover { opacity: '+o2+' !important; }';
+	}
+	if (sfw == 'SFW' || sfw == 'SFW1' || sfw == 'SFW2' || sfw == 'Paranoid') {
+		// `content: url(...)` on a regular element replaces it with an image (used e.g. for logos)
+		magic += ' html, html * { content: normal !important; }';
 	}
 	if (sfw == 'SFW') {
 		if (o1Num == 0 && collapseimage == 'true') magic += ' object, embed, param, video, audio { display: none !important; }';
@@ -340,9 +345,17 @@ chrome.runtime.onMessage.addListener(function(request, sender, sendResponse) {
 	return false;
 });
 
+// Reveal a page hidden by css/prestealth.css (injected at document_start on pages expected to be cloaked)
+function markReady() {
+	clearTimeout(dpReadyFallback);
+	if (document.documentElement) document.documentElement.setAttribute('data-dp-ready', '');
+}
+// Never leave a page hidden if the background does not answer
+var dpReadyFallback = setTimeout(markReady, 3000);
+
 // Bootstrap: ask the background (once) whether this tab should be cloaked and with which settings
 dpSend({reqtype: "get-cloak-state"}, function(state) {
-	if (!state || !state.settings) return;
+	if (!state || !state.settings) { markReady(); return; }
 	var settings = state.settings;
 	var setHotkeys = function() { hotkeySet(settings.enableToggle, settings.hotkey, settings.paranoidhotkey); };
 	if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', setHotkeys, {once: true});
@@ -351,4 +364,5 @@ dpSend({reqtype: "get-cloak-state"}, function(state) {
 		addInitialStealth(settings.background);
 		applyCloak(settings);
 	}
+	markReady();
 });

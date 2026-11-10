@@ -1,0 +1,5 @@
+/* Injected at document_start on pages that are expected to be cloaked (blacklisted domains,
+   or every page in global / "cloak new pages" mode). It keeps the page hidden until the
+   content script has applied (or decided not to apply) the cloak, so images never flash
+   while the service worker wakes up. The content script sets data-dp-ready on <html>. */
+html:not([data-dp-ready]), html:not([data-dp-ready]) * { visibility: hidden !important; }
