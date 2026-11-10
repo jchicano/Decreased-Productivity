@@ -10,6 +10,7 @@ var version = chrome.runtime.getManifest().version;
 var cloakedTabs = [];      // tabs that are currently cloaked
 var uncloakedTabs = [];    // tabs that are currently not cloaked (used for stickiness)
 var manualUncloak = {};    // tabId -> domain the user explicitly uncloaked on that tab
+var manualCloakTabs = [];  // tabs the user cloaked on purpose (icon, hotkey, "open safely", stickiness)
 var dpicon = 'coffee', dptitle = 'Decreased Productivity';
 var blackList = [], whiteList = [];
 
@@ -67,10 +68,11 @@ async function initializeExtension() {
 async function restoreTabState() {
 	try {
 		if (!chrome.storage.session) return;
-		var saved = await chrome.storage.session.get(['cloakedTabs', 'uncloakedTabs', 'manualUncloak']);
+		var saved = await chrome.storage.session.get(['cloakedTabs', 'uncloakedTabs', 'manualUncloak', 'manualCloakTabs']);
 		if (Array.isArray(saved.cloakedTabs)) cloakedTabs = saved.cloakedTabs;
 		if (Array.isArray(saved.uncloakedTabs)) uncloakedTabs = saved.uncloakedTabs;
 		if (saved.manualUncloak && typeof saved.manualUncloak === 'object') manualUncloak = saved.manualUncloak;
+		if (Array.isArray(saved.manualCloakTabs)) manualCloakTabs = saved.manualCloakTabs;
 	} catch(e) {
 		console.error('[DP] Could not restore tab state:', e);
 	}
@@ -81,7 +83,7 @@ function persistTabState() {
 	if (!chrome.storage.session) return;
 	clearTimeout(persistTimer);
 	persistTimer = setTimeout(function() {
-		chrome.storage.session.set({cloakedTabs: cloakedTabs, uncloakedTabs: uncloakedTabs, manualUncloak: manualUncloak})
+		chrome.storage.session.set({cloakedTabs: cloakedTabs, uncloakedTabs: uncloakedTabs, manualUncloak: manualUncloak, manualCloakTabs: manualCloakTabs})
 			.catch(function(e) { console.error('[DP] Could not save tab state:', e); });
 	}, 50);
 }
@@ -105,9 +107,20 @@ function forgetTab(tabId) {
 	i = uncloakedTabs.indexOf(tabId);
 	if (i != -1) uncloakedTabs.splice(i, 1);
 	delete manualUncloak[tabId];
+	i = manualCloakTabs.indexOf(tabId);
+	if (i != -1) manualCloakTabs.splice(i, 1);
 	persistTabState();
 }
 function isCloakedTab(tabId) { return cloakedTabs.indexOf(tabId) != -1; }
+// A manual cloak follows the tab across domains (tab-specific mode); a cloak triggered only
+// by the blacklist does not, so leaving a blacklisted site uncloaks the tab again.
+function setManualCloak(tabId, on) {
+	var i = manualCloakTabs.indexOf(tabId);
+	if (on && i == -1) manualCloakTabs.push(tabId);
+	else if (!on && i != -1) manualCloakTabs.splice(i, 1);
+	persistTabState();
+}
+function isManualCloak(tabId) { return manualCloakTabs.indexOf(tabId) != -1; }
 
 // ----- Supporting Functions
 
@@ -125,7 +138,7 @@ function enabled(tab) {
 	if (dpdomaincheck == '1') return 'true';
 	if (!isTrue(localStorage["enable"])) return 'false';
 	if (isTrue(localStorage["global"])) return 'true';
-	if (isCloakedTab(tab.id) || localStorage["newPages"] == "Cloak") return 'true';
+	if (isManualCloak(tab.id) || localStorage["newPages"] == "Cloak") return 'true';
 	return 'false';
 }
 function domainCheck(domain) {
@@ -273,6 +286,7 @@ function newCloak(info, tab) {
 	chrome.tabs.create({'url': url, 'openerTabId': tab ? tab.id : undefined}, function(newTab) {
 		if (chrome.runtime.lastError || !newTab) return;
 		markCloaked(newTab.id);
+		setManualCloak(newTab.id, true);
 	});
 }
 function initializeContextMenus() {
@@ -406,9 +420,11 @@ function dpHandle(tab) {
 			// Remember the manual choice so the tab is not re-cloaked on reload
 			// (e.g. a blacklisted domain or "cloak new pages") while it stays on this domain
 			manualUncloak[tab.id] = domain;
+			setManualCloak(tab.id, false);
 			setTabCloak(tab, false);
 		} else {
 			delete manualUncloak[tab.id];
+			setManualCloak(tab.id, true);
 			setTabCloak(tab, true);
 		}
 	}
@@ -474,6 +490,7 @@ chrome.tabs.onUpdated.addListener(function(tabId, changeinfo, tab) {
 			&& domainCheck(domain) != '0'
 			&& tab.openerTabId !== undefined && isCloakedTab(tab.openerTabId)) {
 			markCloaked(tabId);
+			setManualCloak(tabId, true);
 			magician('true', tabId);
 			return;
 		}
@@ -487,6 +504,7 @@ chrome.tabs.onRemoved.addListener(function(tabId) {
 chrome.tabs.onReplaced.addListener(function(addedTabId, removedTabId) {
 	ready.then(function() {
 		if (isCloakedTab(removedTabId)) markCloaked(addedTabId);
+		if (isManualCloak(removedTabId)) setManualCloak(addedTabId, true);
 		forgetTab(removedTabId);
 	});
 });
@@ -527,7 +545,7 @@ var requestDispatchTable = {
 			localStorage["savedsfwmode"] = "";
 			localStorage["enable"] = "true";
 			if (isTrue(localStorage["global"])) recursiveCloak('true', 'true');
-			else { delete manualUncloak[sender.tab.id]; setTabCloak(sender.tab, true); }
+			else { delete manualUncloak[sender.tab.id]; setManualCloak(sender.tab.id, true); setTabCloak(sender.tab, true); }
 		} else {
 			dpHandle(sender.tab);
 		}
@@ -539,7 +557,7 @@ var requestDispatchTable = {
 			localStorage["sfwmode"] = "Paranoid";
 			localStorage["enable"] = "true";
 			if (isTrue(localStorage["global"])) recursiveCloak('true', 'true');
-			else { delete manualUncloak[sender.tab.id]; setTabCloak(sender.tab, true); }
+			else { delete manualUncloak[sender.tab.id]; setManualCloak(sender.tab.id, true); setTabCloak(sender.tab, true); }
 		} else {
 			localStorage["sfwmode"] = localStorage["savedsfwmode"];
 			localStorage["savedsfwmode"] = "";
