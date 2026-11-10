@@ -108,7 +108,7 @@ All contributions will be reviewed before merging. Please ensure your code:
 
 * **Original Extension:** Created by Andrew Y.
 * **Icon Design:** by dunedhel
-* **Manifest V3 Migration:** Assisted by [Cursor AI](https://cursor.sh)
+* **Manifest V3 Migration:** AI-assisted
 * **Maintained by:** Community contributions
 
 ## Showing Thanks
