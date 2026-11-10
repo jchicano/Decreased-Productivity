@@ -1,11 +1,11 @@
 # Decreased Productivity
 
-> **Note:** This is a maintained fork of the original [Decreased Productivity extension](https://github.com/jchicano/Decreased-Productivity), updated to Manifest V3 for compatibility with modern Chrome versions (88+).
+> **Note:** This is a maintained fork of the original [Decreased Productivity extension](https://github.com/jchicano/Decreased-Productivity), updated to Manifest V3 for compatibility with modern Chrome versions (102+).
 
 Discreetly surf the web! Control exactly how you want web pages to look like. A Chrome and Firefox extension.
 
-**Current Version:** 0.47.0.1
-**Chrome Compatibility:** Chrome 88+ (tested on Chrome 141+)
+**Current Version:** 0.47.0.2
+**Chrome Compatibility:** Chrome 102+ (tested on Chrome 156)
 
 * ~~Chrome Web Store~~ (original extension was unpublished - see installation instructions below)
 * Firefox: https://addons.mozilla.org/firefox/addon/decreased-productivity-andryou/
@@ -17,6 +17,15 @@ Translated for 17 different languages/dialects: Arabic, German, English (US), En
 Please note that I am not responsible for what you do with this extension and any subsequent consequences; please browse responsibly.
 
 Featured on Lifehacker: http://lifehacker.com/5666312/decreased-productivity-for-chrome-camouflages-your-non+work-browsing
+
+## What's New in v0.47.0.2
+
+- 🐛 **Blacklist fixed**: blacklisted domains are cloaked again. A tab that had visited any non-listed page (or was seen while the service worker was still starting) was wrongly remembered as "uncloaked" and the blacklist was ignored for it.
+- 🐛 Tab state survives service worker restarts (stored in `chrome.storage.session`), and every handler waits for settings to load.
+- 🐛 Restored cloak CSS rules lost in the MV3 migration (links, inputs, background images, borders, site-specific fixes); image opacity in SFW modes works again.
+- 🐛 Replaced removed `DOMSubtreeModified` events with `MutationObserver`; uncloaking now fully restores the page title and favicon.
+- 🐛 Settings saved as booleans by the options page are handled consistently; the options page no longer renders before settings are loaded.
+- Minimum Chrome version is now 102.
 
 ## What's New in This Fork (v0.47.0.1)
 
@@ -86,7 +95,7 @@ This is a community-maintained fork. Contributions are welcome!
 ### Development
 - Fork this repository
 - Make your changes
-- Test thoroughly with Chrome 88+
+- Test thoroughly with Chrome 102+
 - Submit a PR with a clear description of your changes
 
 All contributions will be reviewed before merging. Please ensure your code:

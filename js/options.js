@@ -1,10 +1,7 @@
 // (c) Andrew
 // Icon by dunedhel: http://dunedhel.deviantart.com/
 // Supporting functions by AdThwart - T. Joseph
-// Version is now available from manifest directly
-var version = "0.47.0.1";
-// Background page is no longer available in MV3, use messaging instead
-var bkg = null;
+var version = chrome.runtime.getManifest().version;
 var error = false;
 var oldglobalstate = false;
 var settingnames = [];
@@ -36,7 +33,21 @@ function extractHostnameFromInput(input) {
 		return '';
 	}
 }
+// The options page keeps a window.localStorage mirror of chrome.storage.local (the source of
+// truth shared with the service worker). Refresh it before reading any option so the page
+// never renders stale or missing values.
+function syncMirror(data) {
+	for (var key in data) {
+		if (data.hasOwnProperty(key) && data[key] !== undefined && data[key] !== null) localStorage[key] = String(data[key]);
+	}
+}
 document.addEventListener('DOMContentLoaded', function () {
+	chrome.storage.local.get(null, function(data) {
+		syncMirror(data || {});
+		initOptionsPage();
+	});
+});
+function initOptionsPage() {
 	$("#tabs").tabs();
 	$("#o1").slider({min: 0, max: 1, step: 0.05, slide: function(event, ui) { $("#opacity1").val(ui.value); opacitytest(); }, stop: function(event, ui) { 
 		if (ui.value == 0) $("#collapseimageblock").show();
@@ -130,7 +141,7 @@ document.addEventListener('DOMContentLoaded', function () {
 	$("#importsettings").click(settingsImport);
 	$("#savetxt").click(downloadtxt);
 	$(".i18_close").click(closeOptions);
-});
+}
 function keyhandle(keypressed) {
 	keypressed = keypressed.toUpperCase();
 	if ($("#hotkey").attr('disabled')) {
@@ -148,38 +159,24 @@ function keyhandle(keypressed) {
 	}
 }
 function loadCheckbox(id) {
-	// Load from chrome.storage.local first (for MV3), fallback to localStorage
-	chrome.storage.local.get([id], function(result) {
-		var value;
-		if (result[id] !== undefined) {
-			value = result[id];
-			localStorage[id] = value; // Sync to localStorage
-		} else {
-			value = localStorage[id];
-		}
-		
-		document.getElementById(id).checked = value == 'true' || value === true;
-	});
+	var value = localStorage[id];
+	document.getElementById(id).checked = (value == 'true');
 }
 
 function loadElement(id, defaultValue) {
-	// Load from chrome.storage.local first (for MV3), fallback to localStorage
-	chrome.storage.local.get([id], function(result) {
-		if (result[id] !== undefined && result[id] !== 'undefined') {
-			$("#"+id).val(result[id]);
-			localStorage[id] = result[id]; // Sync to localStorage
-		} else if (typeof localStorage[id] !== 'undefined' && localStorage[id] !== 'undefined') {
-			$("#"+id).val(localStorage[id]);
-		} else if (defaultValue !== undefined) {
-			$("#"+id).val(defaultValue);
-			localStorage[id] = defaultValue;
-			chrome.storage.local.set({[id]: defaultValue});
-		}
-	});
+	var value = localStorage[id];
+	if (typeof value !== 'undefined' && value !== null && value !== 'undefined') {
+		$("#"+id).val(value);
+	} else if (defaultValue !== undefined) {
+		$("#"+id).val(defaultValue);
+		localStorage[id] = defaultValue;
+		chrome.storage.local.set({[id]: defaultValue});
+	}
 }
 
 function saveCheckbox(id) {
-	var value = document.getElementById(id).checked;
+	// Store as a string, like every other setting
+	var value = String(document.getElementById(id).checked);
 	localStorage[id] = value;
 	// Also save to chrome.storage.local for MV3 service worker
 	chrome.storage.local.set({[id]: value});

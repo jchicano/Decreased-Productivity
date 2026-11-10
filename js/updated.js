@@ -6,8 +6,7 @@ document.addEventListener('DOMContentLoaded', function () {
 function closeOptions() {
 	window.open('', '_self', '');window.close();
 }
-// Version is now available from manifest directly
-var version = "0.47.0.1";
+var version = chrome.runtime.getManifest().version;
 function i18load() {
 	$("#title").html("Decreased Productivity v"+version);
 	$(".i18_dpoptions").val(chrome.i18n.getMessage("dpoptions"));
