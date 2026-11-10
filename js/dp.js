@@ -96,20 +96,54 @@ function addCloak(sfw, f, fsize, u, bg, text, table, link, bold, o1, o2, collaps
 		magic += " ._4zoz._4zoz._4zoz, ._559p { clear: both !important; } "; // fix main timeline post status box
 		magic += " ._2yq ._4-u2::before { background-color: transparent !important; } "; // fix main timeline post title bars
 		magic += " ._2-sx { position: absolute !important; top: 0 !important; left: 0 !important; } "; // fix spotlight photo positioning
+		magic += " ._4d3w._2nw8 ._4g9v, ._4d3w._2nw8 ._4g9v *, ._4d3w._2nw8 .snowliftOverlayBar, ._4d3w .rightButtons .overlayBarButtons, ._4d3w .rightButtons .overlayBarButtons * { background-color: transparent !important; } "; // make spotlight top/bottom bars transparent
 		magic += " ._1ift { pointer-events: initial !important; } "; // make chat icons react to hover
 		magic += " ._3htz { display: none !important; } "; // hide video overlay
 	}
 	else if (curlocation.match(/^https?:\/\/www\.youtube\.com\//i)) {
 		magic += " .ytp-gradient-top, .ytp-gradient-bottom { display: none !important; } "; // improve embedded youtube display
-		magic += " .ytp-chrome-top, .ytp-title, .ytp-title *, .ytp-chrome-bottom[style], .ytp-chrome-bottom * { background-color: transparent !important; } ";
-		magic += " .ytp-play-button:not(.ytp-play-button-playlist)::before, .ytp-fullscreen-button::after { display: none !important; } ";
+		magic += " .ytp-chrome-top, .ytp-title, .ytp-title *, .ytp-chrome-bottom[style], .ytp-chrome-bottom * { background-color: transparent !important; } "; // improve embedded youtube display
+		magic += " .ytp-play-button:not(.ytp-play-button-playlist)::before, .ytp-fullscreen-button::after { display: none !important; } "; // improve embedded youtube display
+		magic += " .like-button-renderer-like-button:before, .like-button-renderer-dislike-button:before, .yt-high-contrast-mode-white .yt-uix-button-subscribe-branded:before { content: '' !important; } ";
+	}
+	else if (curlocation.match(/^https?:\/\/www\.instagram\.com\//i)) {
+		magic += " ._ovg3g, ._njmhc { position: initial !important; } ._sppa1 { display: none !important; } ";
 	}
 	else if (curlocation.match(/^https?:\/\/web\.whatsapp\.com\//i)) {
 		magic += " .app > div, .app > div > div, .app > div > div > span { background-color: transparent !important; } "; // fix blank white screen
+		magic += " .message-in { float: none !important; } "; // fix incoming message display
+		magic += " .msg { clear: both !important; } "; // fix outgoing message display
 		magic += ' .copyable-text, .copyable-text > div { background-color: transparent !important; } '; // fix message timestamping
 		magic += ' .message-in, .message-out { border: 1px dotted #' + table + ' !important; } '; // distinguish bubbles
-		if (sfw == 'Paranoid') magic += ' div[data-asset-intro-image="true"] { display: none !important; } '; // hide welcome graphic
-		magic += ' .copyable-text img { pointer-events: initial !important; } ';
+		magic += ' .drawer-manager, .drawer-manager > .pane { background-color: transparent !important; } '; // fix white screen bug
+		magic += ' .video-thumb, .video-thumb > div { background-color: transparent !important; } '; // show video thumbnails
+		magic += ' .message-out .tail-container { display: none !important; } '; // hide message out tail
+		if (sfw == 'SFW' || sfw == 'SFW1' || sfw == 'SFW2') {
+			magic += ' div[data-asset-intro-image="true"] { opacity: '+o1+' !important; } div[data-asset-intro-image="true"]:hover { opacity: '+o2+' !important; } '; // add cloak support for welcome graphic
+			magic += ' .icon { opacity: '+o1+' !important; } .icon:hover { opacity: '+o2+' !important; } '; // add cloak support for welcome graphic
+			magic += ' .video-thumb > div { opacity: '+o1+' !important; } .video-thumb > div:hover { opacity: '+o2+' !important; } '; // add cloak support for video thumbnails
+			magic += ' .emojik { opacity: '+o1+' !important; } .emojik:hover { opacity: '+o2+' !important; } '; // add cloak support for emoji list
+		} else if (sfw == 'Paranoid') magic += ' div[data-asset-intro-image="true"] { display: none !important; } '; // hide welcome graphic
+		magic += ' .copyable-text img { pointer-events: initial !important; } '; // make emojis and icons at cloak-hover opacity
+	}
+	else if (curlocation.match(/^https?:\/\/(?:twitter|x)\.com\//i)) {
+		magic += " .QuoteTweet, .QuoteTweet *, #playerContainer, #playerContainer *, .Gallery, .Gallery * { background-color: transparent !important; } ";
+		if (sfw != 'Paranoid' && sfw != 'SFW1') magic += " #playerContainer video { opacity: 1 !important; } ";
+		magic += " .Grid--withGutter>.Grid-cell { margin-right: -1px !important; margin-left: -1px !important; } ";
+	}
+	else if (curlocation.match(/^https?:\/\/www\.engadget\.com\//i)) {
+		magic += " .o-hit { cursor: initial !important; } ";
+		magic += " .o-hit .o-hit__link { position: initial !important; } ";
+	}
+	else if (curlocation.match(/^https?:\/\/.*\.?((lifehack|gawk)er|deadspin|jalopnik|gizmodo|jezebel|kotaku)\.com\//i)) {
+		magic += " .img-border:after { position: initial !important; } ";
+	}
+	else if (curlocation.match(/^https?:\/\/www\.reddit\.com\//i)) {
+		magic += ' .res-nightmode #header-bottom-right { background-color: #' + bg + ' !important; border-color: #' + table + ' !important; } ';
+		magic += ' .RES-keyNav-activeElement, .RES-keyNav-activeElement .md-container, .res-commentBoxes .comment, .res-commentBoxes .comment .comment, .res-commentBoxes .comment .comment .comment, .res-commentBoxes .comment .comment .comment .comment, .res-commentBoxes .comment .comment .comment .comment .comment, .res-commentBoxes .comment .comment .comment .comment .comment .comment, .res-commentBoxes .comment .comment .comment .comment .comment .comment .comment, .res-commentBoxes .comment .comment .comment .comment .comment .comment .comment .comment, .res-commentBoxes .comment .comment .comment .comment .comment .comment .comment .comment .comment, .res-commentBoxes .comment .comment .comment .comment .comment .comment .comment .comment .comment .comment  { background-color: #' + bg + ' !important; border-color: #' + table + ' !important; } ';
+		magic  += ' .res-nightmode .link, .res-nightmode .RES-keyNav-activeElement, .res-nightmode .RES-keyNav-activeElement .md-container, .res-nightmode.res-commentBoxes .comment, .res-nightmode.res-commentBoxes .comment .comment, .res-nightmode.res-commentBoxes .comment .comment .comment, .res-nightmode.res-commentBoxes .comment .comment .comment .comment, .res-nightmode.res-commentBoxes .comment .comment .comment .comment .comment, .res-nightmode.res-commentBoxes .comment .comment .comment .comment .comment .comment, .res-nightmode.res-commentBoxes .comment .comment .comment .comment .comment .comment .comment, .res-nightmode.res-commentBoxes .comment .comment .comment .comment .comment .comment .comment .comment, .res-nightmode.res-commentBoxes .comment .comment .comment .comment .comment .comment .comment .comment .comment, .res-nightmode.res-commentBoxes .comment .comment .comment .comment .comment .comment .comment .comment .comment .comment { background-color: #' + bg + ' !important; border-color: #' + table + ' !important; } ';
+		magic += ' .res-nightmode #header-bottom-right a, .res-nightmode a.title, .res-nightmode a.title:visited, .res-nightmode .RES-keyNav-activeElement > .tagline, .res-nightmode .RES-keyNav-activeElement .md-container > .md, .res-nightmode .RES-keyNav-activeElement .md-container > .md p, .res-nightmode #search input[type="text"] { color: #' + text + ' !important; } ';
+		magic += ' .usertext-edit textarea { border: 1px dotted #' + table + ' !important; } ';
 	}
 	else if (curlocation.match(/^https?:\/\/.+\.(?:wikia|fandom)\.com\//i)) {
 		magic += " body.background-dynamic.skin-oasis::after, body.background-dynamic.skin-oasis::before { background-image: none !important; } ";
